@@ -26,11 +26,15 @@ Current state: see [STATE.md](STATE.md) (always current) and [BACKLOG.md](BACKLO
 ## Quickstart (Phase 0 baseline)
 
 ```bash
-make up          # start + wait until every container is healthy (~2-4 min first run: image pulls)
+make up          # start + wait until every container is healthy
 make ps          # all containers healthy
 make smoke-test  # Phase 0: infra checks PASS, E2E E2E checks fail LOUDLY by design (exit 1)
 make down        # stop (data volumes preserved)
 ```
+
+Measured on the dev machine (12 vCPU, rootless Docker, see `EVIDENCE/phase-0.md`):
+cold `make up` after images are present ≈ 80 s. First run additionally downloads
+images once (~3.2 GB: Airflow 2.14 GB + Kafka 628 MB + Postgres 420 MB).
 
 First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 

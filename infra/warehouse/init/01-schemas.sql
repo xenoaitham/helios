@@ -1,6 +1,6 @@
-# HELIOS warehouse bootstrap — runs ONLY on first start with an empty data volume
-# (docker-entrypoint-initdb.d). To re-run from scratch: `make clean && make up`
-# (destructive: wipes all platform data).
+-- HELIOS warehouse bootstrap — runs ONLY on first start with an empty data volume
+-- (docker-entrypoint-initdb.d). To re-run from scratch: `make clean && make up`
+-- (destructive: wipes all platform data).
 
 CREATE SCHEMA IF NOT EXISTS raw;
 CREATE SCHEMA IF NOT EXISTS staging;
