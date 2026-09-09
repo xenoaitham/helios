@@ -114,26 +114,27 @@ deterministically with 3 years of order history on first boot.
 ```bash
 make seed-soap          # row counts + gross revenue report (idempotent)
 make smoke-soap         # zeep round-trip: create/replay/status/transition-fault/pagination
-make test-soap          # pytest suite in a throwaway container (34 tests)
+make test-soap          # pytest suite in a throwaway container (35 tests)
 make contract-freeze    # re-capture contract/OrderManagement.wsdl after a WSDL change
 ```
 
 The golden WSDL artifact at `soap-service/contract/OrderManagement.wsdl` is the frozen
 contract; `tests/test_wsdl_golden.py` fails if the served WSDL drifts from it.
 
-### Source 4: oltp (Phase 1)
+### Source 2: file-drop (Phase 1)
 
-The "modern" OLTP source ([ADR-002](DECISIONS/adr-002-oltp-source.md)): normalized
-`users / orders / order_items / payments` schema applied by a seeder (never by rebuilding
-the volume), **5.4M rows** loaded via a single atomic COPY transaction, and a
-continuous mutation loop (status walks, logins, bounded inserts/deletes) generating
-measured WAL churn for Phase-2 Debezium CDC.
+Nightly CSV feed generator ([ADR-004](DECISIONS/adr-004-file-drop.md)) writing
+`customers-<date>.csv` (5,000 rows, PII-carrying) and `products-<date>.csv` (2,000 rows,
+OLTP-coherent SKUs/prices) into an SFTP-style drop volume, with seeded, classified dirt:
+~2% verbatim duplicate rows, ragged columns (short *and* long), one cp1252-encoded row
+inside the UTF-8 file, and `--late-offset` backdating for late-arrival simulation.
+Same inputs ⇒ byte-identical files (replayable extractor bugs).
 
 ```bash
-make seed-oltp      # idempotent seed + self-healing constraints (skip if already seeded)
-make oltp-status    # row counts, on-disk sizes, 15s measured WAL delta
-make test-oltp      # 26 pytest tests against a dedicated oltp_test db
-make reseed-oltp    # DESTRUCTIVE (OLTP source only): truncate + reload
+make drop-generate       # emit today's feeds with all dirt modes
+make drop-generate-late  # late-arrival simulation (backdated 2 days)
+make drop-ls             # inspect the drop volume
+make test-drop           # 15 dirt-classification/CLI tests
 ```
 
 ### Source 3: rest-mock (Phase 1)
@@ -150,20 +151,19 @@ make test-rest      # 34 pytest tests (pagination walk, bucket math, flake deter
 make smoke-rest     # walks ALL 2,500 promotions, retrying real 429s/500s
 ```
 
-### Source 2: file-drop (Phase 1)
+### Source 4: oltp (Phase 1)
 
-Nightly CSV feed generator ([ADR-004](DECISIONS/adr-004-file-drop.md)) writing
-`customers-<date>.csv` (5,000 rows, PII-carrying) and `products-<date>.csv` (2,000 rows,
-OLTP-coherent SKUs/prices) into an SFTP-style drop volume, with seeded, classified dirt:
-~2% verbatim duplicate rows, ragged columns (short *and* long), one cp1252-encoded row
-inside the UTF-8 file, and `--late-offset` backdating for late-arrival simulation.
-Same inputs ⇒ byte-identical files (replayable extractor bugs).
+The "modern" OLTP source ([ADR-002](DECISIONS/adr-002-oltp-source.md)): normalized
+`users / orders / order_items / payments` schema applied by a seeder (never by rebuilding
+the volume), **5.4M rows** loaded via a single atomic COPY transaction, and a
+continuous mutation loop (status walks, logins, bounded inserts/deletes) generating
+measured WAL churn for Phase-2 Debezium CDC.
 
 ```bash
-make drop-generate       # emit today's feeds with all dirt modes
-make drop-generate-late  # late-arrival simulation (backdated 2 days)
-make drop-ls             # inspect the drop volume
-make test-drop           # 15 dirt-classification/CLI tests
+make seed-oltp      # idempotent seed + self-healing constraints (skip if already seeded)
+make oltp-status    # row counts, on-disk sizes, 15s measured WAL delta
+make test-oltp      # 26 pytest tests against a dedicated oltp_test db
+make reseed-oltp    # DESTRUCTIVE (OLTP source only): truncate + reload
 ```
 
 ## Repository layout
