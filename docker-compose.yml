@@ -11,6 +11,7 @@
 #   oltp-seed      one-shot: schema + 5M+ row COPY seed of the OLTP source (ADR-002)
 #   oltp-mutator   continuous updates+deletes on the OLTP source (CDC fuel, ADR-002)
 #   rest-mock      Pricing & Promotions mock API: paging, 429s, flaky 500s (ADR-003)
+#   filedrop-tools one-shot tool: nightly CSV feeds with dirt into a drop volume (ADR-004)
 #
 # All credentials come from .env (see .env.example).
 
@@ -163,6 +164,19 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # Phase 1 source (ADR-004): nightly CSV feed generator writing into an SFTP-style
+  # drop volume. One-shot TOOL, not part of `make up` (profiles gate it); invoked
+  # via make drop-generate / drop-generate-late / drop-ls / test-drop.
+  filedrop-tools:
+    build: ./file-drop
+    image: helios/filedrop-tools:latest
+    container_name: helios-filedrop-tools
+    volumes:
+      - filedrop_data:/data/drop
+    command: python -m filedrop.generate --report
+    restart: "no"
+    profiles: ["tools"]
+
   airflow-db:
     image: postgres:16-alpine
     container_name: helios-airflow-db
@@ -268,3 +282,4 @@ volumes:
   airflow_logs:
   kafka_data:
   soap_data:
+  filedrop_data:

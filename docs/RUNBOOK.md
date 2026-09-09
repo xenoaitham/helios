@@ -50,6 +50,20 @@ while debugging an extractor, 0 to silence), `REST_MOCK_RATE_CAPACITY` /
 `REST_MOCK_RATE_REFILL_PER_SEC` (default 30 / 10 per second). Send an `X-API-Key`
 header to get an isolated rate bucket.
 
+Phase 1 additions (file-drop, ADR-004):
+
+| Command | Effect |
+|---|---|
+| `make drop-generate` | Emit today's `customers-`/`products-<date>.csv` with all dirt modes into the drop volume |
+| `make drop-generate-late` | Late-arrival simulation: backdated batch (2 days) lands now |
+| `make drop-ls` | List drop volume: files, sizes, arrival timestamps |
+| `make test-drop` | 15 dirt-classification + CLI tests |
+
+Notes: the drop point is the `filedrop_data` volume (SFTP-style, outside the repo);
+same inputs give byte-identical files; re-running the same batch date overwrites in
+place. The drop volume grows until cleaned — targeted `docker compose run --rm
+filedrop-tools sh -c "rm /data/drop/<file>"` or `make down -v` (destroys ALL data).
+
 ## 2. Endpoints & credentials
 
 All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:

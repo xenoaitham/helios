@@ -14,7 +14,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
-| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ◐ in progress — soap ([EVIDENCE/phase-1-soap.md](EVIDENCE/phase-1-soap.md)), oltp ([EVIDENCE/phase-1-oltp.md](EVIDENCE/phase-1-oltp.md)), rest-mock ([EVIDENCE/phase-1-rest.md](EVIDENCE/phase-1-rest.md)) |
+| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ⬜ |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
 | 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
@@ -150,6 +150,22 @@ make test-rest      # 34 pytest tests (pagination walk, bucket math, flake deter
 make smoke-rest     # walks ALL 2,500 promotions, retrying real 429s/500s
 ```
 
+### Source 2: file-drop (Phase 1)
+
+Nightly CSV feed generator ([ADR-004](DECISIONS/adr-004-file-drop.md)) writing
+`customers-<date>.csv` (5,000 rows, PII-carrying) and `products-<date>.csv` (2,000 rows,
+OLTP-coherent SKUs/prices) into an SFTP-style drop volume, with seeded, classified dirt:
+~2% verbatim duplicate rows, ragged columns (short *and* long), one cp1252-encoded row
+inside the UTF-8 file, and `--late-offset` backdating for late-arrival simulation.
+Same inputs ⇒ byte-identical files (replayable extractor bugs).
+
+```bash
+make drop-generate       # emit today's feeds with all dirt modes
+make drop-generate-late  # late-arrival simulation (backdated 2 days)
+make drop-ls             # inspect the drop volume
+make test-drop           # 15 dirt-classification/CLI tests
+```
+
 ## Repository layout
 
 ```
@@ -160,7 +176,7 @@ scripts/               wait-healthy.sh, smoke-test.sh (grows per phase)
 soap-service/          (Ph.1 ✅) legacy SOAP OrderManagement: spyne, basic auth,
                        deterministic 3y seed, zeep smoke client, frozen WSDL contract
 rest-mock/             (Ph.1 ✅) flaky REST pricing API: cursor paging, 429s, seeded 500s (ADR-003)
-file-drop/             (Ph.1) nightly CSV drop zone + dirty-file generator
+file-drop/             (Ph.1 ✅) nightly CSV drop zone + dirty-file generator (ADR-004)
 oltp/                  (Ph.1 ✅) OLTP schema + 5.4M-row COPY seeder + mutation loop (ADR-002)
 ingest/                (Ph.2) shared extraction library (watermarks, retries)
 dags/                  (Ph.3) Airflow DAGs

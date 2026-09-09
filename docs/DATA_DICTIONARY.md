@@ -136,3 +136,30 @@ the OLTP source and use the same price formula, so Phase-3 joins are coherent.
 
 PII statement for this source: **no identifiers of any kind** — product/pricing data
 only. Nothing to hash at staging.
+
+### Source system: file-drop CSV feeds (`filedrop_data` volume, Phase 1, ADR-004)
+
+"Nightly" vendor exports landing in an SFTP-style drop volume
+(`customers-<YYYYMMDD>.csv`, `products-<YYYYMMDD>.csv`). Deliberately dirty: verbatim
+duplicate rows (~2%), ragged columns (short/long), one cp1252 row inside UTF-8 files,
+late-arriving backdated batches. The CSV headers below are the *contract*; the Phase-2
+extractor must enforce it against the documented dirt.
+
+`customers-<date>.csv` (5,000 rows per batch) — **the PII-carrying batch feed**:
+
+| Column | Type | Null | Notes | PII class |
+|---|---|---|---|---|
+| customer_id | INTEGER | no | 1..5000, stable across batches | none (pseudonymous key) |
+| email | TEXT | no | `first.last.<id>@example.com` (synthetic, RFC-2606 domain) | **pseudonymized** (staging: SHA-256 + salt) |
+| full_name | TEXT | no | synthetic first/last | **pseudonymized** (staging: SHA-256 + salt) |
+| country_code | TEXT | no | 2-letter from a 10-value pool | masked (quasi-identifier) |
+| signup_date | DATE | no | within ~4 years before the batch date | none |
+| tier | TEXT | no | bronze/silver/gold/platinum | none |
+
+`products-<date>.csv` (2,000 rows per batch): sku (unique, `SKU-#####` in the shared
+OLTP/rest-mock space), name, category, `price_cents` (same formula as the other
+sources), supplier_code (SUP-A..D) — PII class: none.
+
+PII statement for this source: the **customers feed is the batch-feed PII surface** —
+email + full_name must be hashed at staging exactly like the OLTP `users` columns; the
+products feed carries no identifiers.

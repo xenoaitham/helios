@@ -4,7 +4,7 @@ COMPOSE := docker compose
 ENV_FILE := .env
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -66,6 +66,18 @@ test-rest: ## Run rest-mock unit tests in a throwaway container
 
 smoke-rest: ## Walk ALL /promotions pages against the running rest-mock (retries 429/500)
 	docker compose exec -T rest-mock python /app/smoke_client.py
+
+drop-generate: ## Emit today's nightly CSV feeds (customers+products, all dirt modes) into the drop volume
+	docker compose run --rm filedrop-tools
+
+drop-generate-late: ## Late-arrival simulation: emit feeds backdated by 2 days
+	docker compose run --rm filedrop-tools python -m filedrop.generate --late-offset 2 --report
+
+drop-ls: ## List the SFTP-style drop volume (files, sizes, arrival times)
+	docker compose run --rm filedrop-tools python -m filedrop.generate --list
+
+test-drop: ## Run file-drop dirt/CLI tests in a throwaway container
+	docker compose run --rm filedrop-tools pytest
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v
