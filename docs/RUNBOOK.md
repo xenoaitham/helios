@@ -23,6 +23,21 @@ Phase 1 additions (soap-service):
 | `make test-soap` | pytest suite (35 tests) in a throwaway container |
 | `make contract-freeze` | Re-capture `soap-service/contract/OrderManagement.wsdl` after a deliberate contract change |
 
+Phase 1 additions (oltp source, ADR-002):
+
+| Command | Effect |
+|---|---|
+| `make seed-oltp` | Apply schema + seed 5.4M rows via one COPY transaction if empty (idempotent; re-ensures constraints/indexes/sequences on every run) |
+| `make reseed-oltp` | **DESTRUCTIVE to the OLTP source only**: `TRUNCATE` all four tables + reload |
+| `make oltp-status` | Row counts, per-table on-disk size, and a 15 s measured WAL-delta report |
+| `make test-oltp` | pytest suite (26 tests) in a throwaway container against a dedicated `oltp_test` db |
+| `make mutator-logs` | Follow the continuous mutation loop's log |
+
+Notes: fresh clones seed automatically on `make up` (the one-shot `oltp-seed` service
+runs before `oltp-mutator` starts; ~3.5 min at default scale — `WAIT_TIMEOUT` defaults
+to 900 s to cover it). The mutator writes continuously (updates + bounded inserts/
+deletes) precisely so Phase-2 CDC sees WAL churn; `make oltp-status` is the instrument.
+
 ## 2. Endpoints & credentials
 
 All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:
@@ -55,6 +70,10 @@ curl -su "$SOAP_BASIC_AUTH_USER:$SOAP_BASIC_AUTH_PASSWORD" \
 | Warehouse missing schemas | Volume was created before init script existed | `make clean && make up` (destroys data — Phase 0 has none worth keeping) |
 | Airflow UI 502 / not up yet | webserver start_period ~30-60s | Re-run `make ps`; check `helios-airflow-init` exited 0 |
 | First `make up` slow on soap-service | First boot seeds ~382k orders (~45 s); healthcheck `start_period` 150 s covers it | Nothing — subsequent boots skip (store non-empty) |
+| First `make up` slow on oltp-seed | Fresh volume: schema + 5.4M-row COPY seed (~3.5 min); `make up` waits via oltp-mutator's dependency chain | Nothing — subsequent boots hit the `--if-empty` skip (~1 s) |
+| `oltp-mutator` unhealthy / crash-looping | `make mutator-logs`; it retries politely while the schema is missing | After a schema/db fix it self-recovers; `docker compose restart oltp-mutator` to force |
+| `oltp-seed` fails mid-load (e.g. disk full) | Seed is one transaction — a crash rolls back to an empty schema | Free disk (`docker builder prune`), re-run `make seed-oltp` |
+| Need OLTP rows/types reference | `docs/DATA_DICTIONARY.md` (OLTP section) | — |
 | SOAP 401 in scripts | Credentials missing in env; the service refuses to boot without `SOAP_BASIC_AUTH_*` | Set them in `.env`, `make up` |
 | `test_served_wsdl_matches_golden` fails | The contract changed (spyne type set) | Review the WSDL diff like an API change, then `make contract-freeze` and commit both |
 

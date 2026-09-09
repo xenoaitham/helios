@@ -66,3 +66,56 @@ PII statement for this source: the OrderManagement system holds **no direct
 identifiers** — only numeric customer keys. Nothing to hash at staging; the PII policy
 applies to sources that carry emails/names (arriving with later Phase 1 components and
 the OLTP schema).
+
+### Source system: OLTP Postgres (`helios-oltp-db`, Phase 1, ADR-002)
+
+The "modern" operational source: `users / orders / order_items / payments` on the
+`oltp_data` volume, seeded deterministically (5.4M rows) and mutated continuously by
+`oltp-mutator`. Money is `NUMERIC(*,2)` (never floats). Timestamps are `timestamptz`
+UTC. This is the source that *does* carry synthetic direct identifiers — the users
+table is the staging PII-hashing demo target for Phase 3. All values are synthetic;
+emails use RFC-2606 `example.com` domains on purpose.
+
+`users` (50,000 rows + mutator-neutral):
+
+| Column | Type | Null | Notes | PII class |
+|---|---|---|---|---|
+| user_id | BIGINT identity PK | no | | none |
+| email | TEXT UNIQUE | no | `first.last.<uid>@example.com` | **pseudonymized** (staging: SHA-256 + salt) |
+| full_name | TEXT | no | synthetic first/last | **pseudonymized** (staging: SHA-256 + salt) |
+| country_code | TEXT | no | 2-letter ISO-ish from a 10-value pool | masked (quasi-identifier) |
+| created_at / last_login_at | TIMESTAMPTZ | last_login nullable | last_login is the mutator's touch column | none |
+| is_active | BOOLEAN | no | 95% true | none |
+
+`orders` (500,000+ rows, grows/shrinks with the mutator):
+
+| Column | Type | Null | Notes | PII class |
+|---|---|---|---|---|
+| order_id | BIGINT identity PK | no | sequential; mutator inserts beyond seed max | none |
+| user_id | BIGINT FK → users | no | | none (pseudonymous key) |
+| status | TEXT | no | NEW/PROCESSING/SHIPPED/DELIVERED/CANCELLED — same vocabulary as the SOAP source; mutator walks it forward | none |
+| currency | TEXT | no | 'USD' | none |
+| total_amount | NUMERIC(12,2) | no | derived from the same item specs as order_items — invariant: equals SUM(quantity × unit_price) per order | none |
+| placed_at | TIMESTAMPTZ | no | uniform over 3 years; `idx_orders_placed_at` = Phase-2 watermark index | none |
+| updated_at | TIMESTAMPTZ | no | advances on mutator status walks (CDC-friendly) | none |
+
+`order_items` (~4.25M rows):
+
+| Column | Type | Null | Notes | PII class |
+|---|---|---|---|---|
+| order_item_id | BIGINT identity PK | no | | none |
+| order_id | BIGINT FK → orders (CASCADE) | no | | none |
+| product_sku | TEXT | no | `SKU-#####`, 100k distinct values | none |
+| quantity | INTEGER | no | 1..5 | none |
+| unit_price | NUMERIC(10,2) | no | $1.99–$151.98 | none |
+
+`payments` (600k+ rows):
+
+| Column | Type | Null | Notes | PII class |
+|---|---|---|---|---|
+| payment_id | BIGINT identity PK | no | | none |
+| order_id | BIGINT FK → orders (CASCADE) | no | | none |
+| method | TEXT | no | card/paypal/bank_transfer/gift_card | none |
+| amount | NUMERIC(12,2) | no | order total, or its **negation** for REFUNDED rows | none |
+| status | TEXT | no | CAPTURED / PENDING (~1%) / REFUNDED (~20% of orders have a second, negative row) | none |
+| paid_at | TIMESTAMPTZ | no | placed_at + 0..71 h | none |

@@ -8,6 +8,8 @@
 #   airflow-webserver / airflow-scheduler — orchestration (DAGs arrive in Phase 3)
 #   soap-service   legacy OrderManagement SOAP 1.1 source (Phase 1; ADR-001)
 #                  SQLite store on named volume soap_data; WSDL at /?wsdl (basic auth)
+#   oltp-seed      one-shot: schema + 5M+ row COPY seed of the OLTP source (ADR-002)
+#   oltp-mutator   continuous updates+deletes on the OLTP source (CDC fuel, ADR-002)
 #
 # All credentials come from .env (see .env.example).
 
@@ -89,6 +91,54 @@ services:
       timeout: 5s
       retries: 12
       start_period: 150s
+    restart: unless-stopped
+
+  # Phase 1 source (ADR-002): one-shot seeder applying schema + 5M+ rows via a
+  # single COPY transaction (--if-empty no-ops when already seeded). Its image
+  # also powers oltp-mutator; tests run in it via `make test-oltp`.
+  oltp-seed:
+    build: ./oltp
+    image: helios/oltp-tools:latest
+    container_name: helios-oltp-seed
+    environment:
+      OLTP_PGHOST: oltp-db
+      OLTP_PGPORT: "5432"
+      OLTP_POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      OLTP_POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      OLTP_POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+      OLTP_SEED_USERS: ${OLTP_SEED_USERS:-50000}
+      OLTP_SEED_ORDERS: ${OLTP_SEED_ORDERS:-500000}
+    command: python -m oltp.seed --if-empty --report
+    depends_on:
+      oltp-db:
+        condition: service_healthy
+    restart: "no"
+
+  # Continuous updates+deletes so CDC (Phase 2) sees real WAL churn; liveness
+  # on GET /health (:8081) feeds the container healthcheck.
+  oltp-mutator:
+    build: ./oltp
+    image: helios/oltp-tools:latest
+    container_name: helios-oltp-mutator
+    environment:
+      OLTP_PGHOST: oltp-db
+      OLTP_PGPORT: "5432"
+      OLTP_POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      OLTP_POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      OLTP_POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+      OLTP_MUTATE_TICK_SECONDS: ${OLTP_MUTATE_TICK_SECONDS:-2}
+    command: python -m oltp.mutate
+    depends_on:
+      oltp-db:
+        condition: service_healthy
+      oltp-seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
   airflow-db:

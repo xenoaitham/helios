@@ -14,7 +14,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
-| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ◐ in progress — soap-service done ([EVIDENCE/phase-1-soap.md](EVIDENCE/phase-1-soap.md)) |
+| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ◐ in progress — soap-service ([EVIDENCE/phase-1-soap.md](EVIDENCE/phase-1-soap.md)), oltp ([EVIDENCE/phase-1-oltp.md](EVIDENCE/phase-1-oltp.md)) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ⬜ |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
 | 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
@@ -47,6 +47,7 @@ First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 | Warehouse Postgres | localhost:5433, db `warehouse` (schemas `raw`, `staging`, `marts`) | `WAREHOUSE_POSTGRES_USER` / `WAREHOUSE_POSTGRES_PASSWORD` |
 | Kafka (host listener) | localhost:29092 | n/a (PLAINTEXT, local dev) |
 | SOAP OrderManagement (legacy source, Phase 1) | http://localhost:8000/?wsdl (WSDL), `/health` (unauthenticated) | `SOAP_BASIC_AUTH_USER` / `SOAP_BASIC_AUTH_PASSWORD` (HTTP basic auth; required on every SOAP path incl. WSDL) |
+| OLTP seeder / mutator (Phase 1) | one-shot + long-running containers; mutator `/health` is internal (:8081, healthcheck only) | reuses `OLTP_POSTGRES_*` |
 
 `make smoke-test` exits non-zero on any health mismatch; Stage 2 (ETL assertions) is
 intentionally unimplemented until Phase 3 — this loud failure is the Phase 0 definition
@@ -120,6 +121,21 @@ make contract-freeze    # re-capture contract/OrderManagement.wsdl after a WSDL 
 The golden WSDL artifact at `soap-service/contract/OrderManagement.wsdl` is the frozen
 contract; `tests/test_wsdl_golden.py` fails if the served WSDL drifts from it.
 
+### Source 4: oltp (Phase 1)
+
+The "modern" OLTP source ([ADR-002](DECISIONS/adr-002-oltp-source.md)): normalized
+`users / orders / order_items / payments` schema applied by a seeder (never by rebuilding
+the volume), **5.4M rows** loaded via a single atomic COPY transaction, and a
+continuous mutation loop (status walks, logins, bounded inserts/deletes) generating
+measured WAL churn for Phase-2 Debezium CDC.
+
+```bash
+make seed-oltp      # idempotent seed + self-healing constraints (skip if already seeded)
+make oltp-status    # row counts, on-disk sizes, 15s measured WAL delta
+make test-oltp      # 26 pytest tests against a dedicated oltp_test db
+make reseed-oltp    # DESTRUCTIVE (OLTP source only): truncate + reload
+```
+
 ## Repository layout
 
 ```
@@ -131,7 +147,7 @@ soap-service/          (Ph.1 ✅) legacy SOAP OrderManagement: spyne, basic auth
                        deterministic 3y seed, zeep smoke client, frozen WSDL contract
 rest-mock/             (Ph.1) flaky REST pricing API
 file-drop/             (Ph.1) nightly CSV drop zone + dirty-file generator
-oltp/                  (Ph.1) OLTP schema + 5M-row seeder + mutation loop
+oltp/                  (Ph.1 ✅) OLTP schema + 5.4M-row COPY seeder + mutation loop (ADR-002)
 ingest/                (Ph.2) shared extraction library (watermarks, retries)
 dags/                  (Ph.3) Airflow DAGs
 dbt/                   (Ph.3) dbt project: staging -> marts

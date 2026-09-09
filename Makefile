@@ -4,7 +4,7 @@ COMPOSE := docker compose
 ENV_FILE := .env
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -45,6 +45,21 @@ reseed-soap: ## DESTRUCTIVE (SOAP store only): drop + reseed SOAP order history
 
 contract-freeze: ## Capture the served WSDL as the golden contract artifact
 	docker compose exec -T soap-service python /app/check_contract.py --emit --out /app/contract/OrderManagement.wsdl
+
+seed-oltp: ## Apply OLTP schema + seed 5M+ rows if empty (idempotent, self-healing; ADR-002)
+	docker compose run --rm oltp-seed
+
+reseed-oltp: ## DESTRUCTIVE (OLTP source only): truncate + reseed the OLTP database
+	docker compose run --rm oltp-seed python -m oltp.seed --reset --report
+
+oltp-status: ## OLTP row counts, on-disk sizes, measured WAL churn (15s window)
+	docker compose run --rm oltp-seed python -m oltp.status --wal-window 15
+
+test-oltp: ## Run oltp seeder/mutator tests in a throwaway container (dedicated oltp_test db)
+	docker compose run --rm oltp-seed pytest
+
+mutator-logs: ## Follow the oltp-mutator mutation-loop logs
+	$(COMPOSE) logs -f --tail 50 oltp-mutator
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

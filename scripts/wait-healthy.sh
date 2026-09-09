@@ -3,8 +3,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-SERVICES=(oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service)
-TIMEOUT="${WAIT_TIMEOUT:-420}"
+# oltp-mutator is gated last: it only starts after oltp-seed completed, so a
+# healthy mutator transitively proves the 5M-row seed finished (fresh clones
+# need headroom for that seed -> WAIT_TIMEOUT=900 by default).
+SERVICES=(oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service oltp-mutator)
+TIMEOUT="${WAIT_TIMEOUT:-900}"
 START=$(date +%s)
 
 for svc in "${SERVICES[@]}"; do
