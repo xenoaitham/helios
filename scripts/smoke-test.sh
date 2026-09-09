@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# HELIOS smoke test — Phase 0 edition.
+# HELIOS smoke test.
 #
 # Stage 1 (infra): every container healthy AND answering a real query
-#                  (SQL on each Postgres, topic list on Kafka, /health on Airflow).
+#                  (SQL on each Postgres, topic list on Kafka, /health on Airflow,
+#                  authenticated WSDL + enforced 401 on soap-service).
 # Stage 2 (E2E):  seed -> run-etl -> mart/SCD2 SQL assertions.
 #                 NOT IMPLEMENTED until Phase 3 — Stage 2 must fail LOUDLY today;
-#                 that is the Phase 0 definition of done (STATE.md, BACKLOG.md).
+#                 that is the expected behaviour by definition-of-done (STATE.md).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,7 +18,7 @@ STAGE1_FAIL=0
 
 echo "===== Stage 1: infrastructure ====="
 
-for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler; do
+for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service; do
   status="$(docker inspect -f '{{.State.Health.Status}}' "helios-${svc}" 2>/dev/null || echo missing)"
   if [ "$status" = "healthy" ]; then
     echo "[ok]   container $svc healthy"
@@ -63,6 +64,18 @@ if docker exec helios-airflow-webserver curl -sf http://localhost:8080/health 2>
   echo "[ok]   airflow /health reports healthy"
 else
   echo "[FAIL] airflow /health endpoint"; STAGE1_FAIL=1
+fi
+
+if docker exec helios-soap-service python /app/check_contract.py >/dev/null 2>&1; then
+  echo "[ok]   soap-service serves the OrderManagement WSDL (basic auth)"
+else
+  echo "[FAIL] soap-service WSDL contract check"; STAGE1_FAIL=1
+fi
+
+if docker exec helios-soap-service python /app/check_contract.py --expect-unauthorized >/dev/null 2>&1; then
+  echo "[ok]   soap-service rejects unauthenticated requests (401)"
+else
+  echo "[FAIL] soap-service auth not enforced"; STAGE1_FAIL=1
 fi
 
 echo

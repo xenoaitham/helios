@@ -1,6 +1,6 @@
 # RUNBOOK — operating HELIOS
 
-Phase 0 edition. Grows each phase. Audience: a stranger with the repo and Docker.
+Grows each phase (currently Phase 1). Audience: a stranger with the repo and Docker.
 
 ## 1. Daily driver commands
 
@@ -9,24 +9,40 @@ Phase 0 edition. Grows each phase. Audience: a stranger with the repo and Docker
 | `make up` | Start platform; block until every container is healthy (fails loudly with logs otherwise) |
 | `make ps` | Container status |
 | `make logs` | Follow all service logs |
-| `make smoke-test` | Stage 1: infra health (must pass). Stage 2: E2E ETL — fails loudly until Phase 3 |
+| `make smoke-test` | Stage 1: infra health incl. SOAP WSDL + auth checks (must pass). Stage 2: E2E ETL — fails loudly until Phase 3 |
 | `make down` | Stop platform; named data volumes preserved |
-| `make clean` | **DESTRUCTIVE**: stop + delete all data volumes (warehouse re-inits schemas on next `make up`) |
+| `make clean` | **DESTRUCTIVE**: stop + delete all data volumes (warehouse re-inits schemas; SOAP store re-seeds on next `make up`) |
+
+Phase 1 additions (soap-service):
+
+| Command | Effect |
+|---|---|
+| `make seed-soap` | Seed SOAP order history if empty; prints row counts + revenue (idempotent) |
+| `make reseed-soap` | **DESTRUCTIVE to the SOAP store only**: drop + reseed its SQLite file |
+| `make smoke-soap` | zeep round-trip against the running service (create → replay → status → legal/illegal transition → pagination) |
+| `make test-soap` | pytest suite (35 tests) in a throwaway container |
+| `make contract-freeze` | Re-capture `soap-service/contract/OrderManagement.wsdl` after a deliberate contract change |
 
 ## 2. Endpoints & credentials
 
-All credentials live in `.env` (defaults in `.env.example`). Phase 0 surfaces:
+All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:
 
 - **Airflow UI**: http://localhost:8080 — `AIRFLOW_WWW_USER` / `AIRFLOW_WWW_PASSWORD`
 - **OLTP Postgres**: `localhost:${OLTP_PORT}` db `oltp`
 - **Warehouse Postgres**: `localhost:${WAREHOUSE_PORT}` db `warehouse`,
   schemas `raw` / `staging` / `marts`
 - **Kafka (from host)**: `localhost:${KAFKA_HOST_PORT}` (in-network: `kafka:9092`)
+- **SOAP OrderManagement**: `http://localhost:${SOAP_PORT}/?wsdl` — HTTP basic auth
+  (`SOAP_BASIC_AUTH_USER` / `SOAP_BASIC_AUTH_PASSWORD`) required on every path including
+  the WSDL; `/health` is the only unauthenticated endpoint (container healthcheck).
+  401 + `WWW-Authenticate` on missing/bad credentials.
 
-Quick psql from host:
+Quick SOAP checks from host:
 
 ```bash
-docker exec -it helios-warehouse-db psql -U warehouse -d warehouse
+make smoke-soap                                        # full zeep round trip
+curl -su "$SOAP_BASIC_AUTH_USER:$SOAP_BASIC_AUTH_PASSWORD" \
+  "http://localhost:${SOAP_PORT}/?wsdl" | head -5      # peek at the WSDL
 ```
 
 ## 3. Failure playbook
@@ -38,6 +54,9 @@ docker exec -it helios-warehouse-db psql -U warehouse -d warehouse
 | `smoke-test` Stage 1 fails | Some container unhealthy or not answering | `make down && make up`; if persists, `docker logs helios-<svc>` |
 | Warehouse missing schemas | Volume was created before init script existed | `make clean && make up` (destroys data — Phase 0 has none worth keeping) |
 | Airflow UI 502 / not up yet | webserver start_period ~30-60s | Re-run `make ps`; check `helios-airflow-init` exited 0 |
+| First `make up` slow on soap-service | First boot seeds ~382k orders (~45 s); healthcheck `start_period` 150 s covers it | Nothing — subsequent boots skip (store non-empty) |
+| SOAP 401 in scripts | Credentials missing in env; the service refuses to boot without `SOAP_BASIC_AUTH_*` | Set them in `.env`, `make up` |
+| `test_served_wsdl_matches_golden` fails | The contract changed (spyne type set) | Review the WSDL diff like an API change, then `make contract-freeze` and commit both |
 
 ## 4. Recovery-from-scratch drill (Phase 0)
 

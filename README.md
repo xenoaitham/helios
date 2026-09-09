@@ -14,7 +14,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
-| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ⬜ |
+| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ◐ in progress — soap-service done ([EVIDENCE/phase-1-soap.md](EVIDENCE/phase-1-soap.md)) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ⬜ |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
 | 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
@@ -38,7 +38,7 @@ images once (~3.2 GB: Airflow 2.14 GB + Kafka 628 MB + Postgres 420 MB).
 
 First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 
-### What is running after Phase 0
+### What is running now
 
 | Service | URL / conn | Credentials (.env) |
 |---|---|---|
@@ -46,6 +46,7 @@ First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 | OLTP Postgres (source) | localhost:5432, db `oltp` | `OLTP_POSTGRES_USER` / `OLTP_POSTGRES_PASSWORD` |
 | Warehouse Postgres | localhost:5433, db `warehouse` (schemas `raw`, `staging`, `marts`) | `WAREHOUSE_POSTGRES_USER` / `WAREHOUSE_POSTGRES_PASSWORD` |
 | Kafka (host listener) | localhost:29092 | n/a (PLAINTEXT, local dev) |
+| SOAP OrderManagement (legacy source, Phase 1) | http://localhost:8000/?wsdl (WSDL), `/health` (unauthenticated) | `SOAP_BASIC_AUTH_USER` / `SOAP_BASIC_AUTH_PASSWORD` (HTTP basic auth; required on every SOAP path incl. WSDL) |
 
 `make smoke-test` exits non-zero on any health mismatch; Stage 2 (ETL assertions) is
 intentionally unimplemented until Phase 3 — this loud failure is the Phase 0 definition
@@ -56,7 +57,7 @@ of done.
 ```mermaid
 flowchart LR
     subgraph SRC["Legacy sources"]
-        SOAP["soap-service (Ph.1)<br/>WSDL-first OrderManagement<br/>spyne - SOAP 1.1 - basic auth"]
+        SOAP["soap-service (Ph.1)<br/>OrderManagement SOAP 1.1<br/>spyne - basic auth - frozen WSDL contract"]
         FF["file-drop (Ph.1)<br/>nightly CSV feeds<br/>dupes - ragged rows - bad encoding"]
         REST["rest-mock (Ph.1)<br/>Pricing and Promotions API<br/>pagination - rate limits - flaky 500s"]
         OLTP[("oltp Postgres (Ph.1)<br/>users - orders - items - payments<br/>5M+ rows - continuous mutations")]
@@ -94,9 +95,30 @@ flowchart LR
     PROM -.-> ORCH
 ```
 
-Only the platform row (Postgres ×2 + Airflow + Kafka + Airflow metadata DB) exists today;
-everything else lands in the phase shown. The diagram is the contract — each phase's
-CRITIC review checks the repo against it.
+Only the platform row (Postgres ×2 + Airflow + Kafka + Airflow metadata DB) and
+**soap-service** exist today; everything else lands in the phase shown. The diagram is
+the contract — each phase's CRITIC review checks the repo against it.
+
+### Source 1: soap-service (Phase 1)
+
+Legacy "OrderManagement" SOAP 1.1 service ([ADR-001](DECISIONS/adr-001-soap-service.md)):
+spyne, HTTP basic auth, operations `CreateOrder / GetOrders / GetOrderStatus /
+UpdateOrderStatus`, state machine NEW→PROCESSING→SHIPPED→DELIVERED (+CANCELLED from
+NEW/PROCESSING), idempotent `CreateOrder` via `client_reference`, faults
+(`OrderNotFound`, `InvalidStateTransition`, `ValidationError`,
+`ClientReferenceConflict`). Owns its own SQLite store on the `soap_data` volume
+(deliberately NOT the OLTP Postgres — independent source systems), seeded
+deterministically with 3 years of order history on first boot.
+
+```bash
+make seed-soap          # row counts + gross revenue report (idempotent)
+make smoke-soap         # zeep round-trip: create/replay/status/transition-fault/pagination
+make test-soap          # pytest suite in a throwaway container (34 tests)
+make contract-freeze    # re-capture contract/OrderManagement.wsdl after a WSDL change
+```
+
+The golden WSDL artifact at `soap-service/contract/OrderManagement.wsdl` is the frozen
+contract; `tests/test_wsdl_golden.py` fails if the served WSDL drifts from it.
 
 ## Repository layout
 
@@ -105,7 +127,8 @@ docker-compose.yml     platform definition (Phase 0 baseline)
 Makefile               up / down / ps / logs / smoke-test / clean (+ env helper)
 infra/warehouse/init/  warehouse bootstrap SQL (raw/staging/marts schemas)
 scripts/               wait-healthy.sh, smoke-test.sh (grows per phase)
-soap-service/          (Ph.1) WSDL-first legacy SOAP service
+soap-service/          (Ph.1 ✅) legacy SOAP OrderManagement: spyne, basic auth,
+                       deterministic 3y seed, zeep smoke client, frozen WSDL contract
 rest-mock/             (Ph.1) flaky REST pricing API
 file-drop/             (Ph.1) nightly CSV drop zone + dirty-file generator
 oltp/                  (Ph.1) OLTP schema + 5M-row seeder + mutation loop

@@ -1,0 +1,5 @@
+spyne==2.14.0
+lxml>=4.9,<7
+zeep>=4.2,<5
+gunicorn>=22,<24
+pytest>=8,<9

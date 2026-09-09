@@ -3,7 +3,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-SERVICES=(oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler)
+SERVICES=(oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service)
 TIMEOUT="${WAIT_TIMEOUT:-420}"
 START=$(date +%s)
 
