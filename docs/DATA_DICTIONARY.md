@@ -119,3 +119,20 @@ emails use RFC-2606 `example.com` domains on purpose.
 | amount | NUMERIC(12,2) | no | order total, or its **negation** for REFUNDED rows | none |
 | status | TEXT | no | CAPTURED / PENDING (~1%) / REFUNDED (~20% of orders have a second, negative row) | none |
 | paid_at | TIMESTAMPTZ | no | placed_at + 0..71 h | none |
+
+### Source system: REST Pricing & Promotions (`helios-rest-mock`, Phase 1, ADR-003)
+
+Mock pricing edge API over an **in-memory, static** deterministic catalog (no runtime
+writes — read flakiness is the modeled behavior; change capture comes from oltp/soap).
+Cursor-paginated (`next_cursor`, keyset by id). Money crosses the API as integer cents
+(`price_cents` + `currency`) — never floats. SKUs live in the same `SKU-#####` space as
+the OLTP source and use the same price formula, so Phase-3 joins are coherent.
+
+`products` (5,000 rows): id, sku (unique), name, category, `price_cents`
+(199 + (sku_num × 613) mod 14999), currency — PII class: none.
+
+`promotions` (2,500 rows): id, product_sku, discount_percent (5–50), starts_at/ends_at
+(ISO dates, windows anchored to a fixed base date), description — PII class: none.
+
+PII statement for this source: **no identifiers of any kind** — product/pricing data
+only. Nothing to hash at staging.

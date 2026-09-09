@@ -14,7 +14,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
-| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ◐ in progress — soap-service ([EVIDENCE/phase-1-soap.md](EVIDENCE/phase-1-soap.md)), oltp ([EVIDENCE/phase-1-oltp.md](EVIDENCE/phase-1-oltp.md)) |
+| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ◐ in progress — soap ([EVIDENCE/phase-1-soap.md](EVIDENCE/phase-1-soap.md)), oltp ([EVIDENCE/phase-1-oltp.md](EVIDENCE/phase-1-oltp.md)), rest-mock ([EVIDENCE/phase-1-rest.md](EVIDENCE/phase-1-rest.md)) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ⬜ |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
 | 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
@@ -136,6 +136,20 @@ make test-oltp      # 26 pytest tests against a dedicated oltp_test db
 make reseed-oltp    # DESTRUCTIVE (OLTP source only): truncate + reload
 ```
 
+### Source 3: rest-mock (Phase 1)
+
+Mock "Pricing & Promotions" API ([ADR-003](DECISIONS/adr-003-rest-mock.md)): FastAPI at
+`http://localhost:8001` with opaque-cursor keyset pagination (`/promotions`,
+`/products`), per-API-key token-bucket rate limiting (429 + `Retry-After`,
+`X-RateLimit-Remaining`), and deterministic seeded flaky 500s (`retryable: true` body).
+Prices are integer cents and coherent with the OLTP item-price formula. `/health` is
+never limited and never flakes.
+
+```bash
+make test-rest      # 34 pytest tests (pagination walk, bucket math, flake determinism)
+make smoke-rest     # walks ALL 2,500 promotions, retrying real 429s/500s
+```
+
 ## Repository layout
 
 ```
@@ -145,7 +159,7 @@ infra/warehouse/init/  warehouse bootstrap SQL (raw/staging/marts schemas)
 scripts/               wait-healthy.sh, smoke-test.sh (grows per phase)
 soap-service/          (Ph.1 ✅) legacy SOAP OrderManagement: spyne, basic auth,
                        deterministic 3y seed, zeep smoke client, frozen WSDL contract
-rest-mock/             (Ph.1) flaky REST pricing API
+rest-mock/             (Ph.1 ✅) flaky REST pricing API: cursor paging, 429s, seeded 500s (ADR-003)
 file-drop/             (Ph.1) nightly CSV drop zone + dirty-file generator
 oltp/                  (Ph.1 ✅) OLTP schema + 5.4M-row COPY seeder + mutation loop (ADR-002)
 ingest/                (Ph.2) shared extraction library (watermarks, retries)

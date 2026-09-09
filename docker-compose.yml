@@ -10,6 +10,7 @@
 #                  SQLite store on named volume soap_data; WSDL at /?wsdl (basic auth)
 #   oltp-seed      one-shot: schema + 5M+ row COPY seed of the OLTP source (ADR-002)
 #   oltp-mutator   continuous updates+deletes on the OLTP source (CDC fuel, ADR-002)
+#   rest-mock      Pricing & Promotions mock API: paging, 429s, flaky 500s (ADR-003)
 #
 # All credentials come from .env (see .env.example).
 
@@ -139,6 +140,27 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+
+  # Phase 1 source (ADR-003): Pricing & Promotions mock API — cursor pagination,
+  # token-bucket 429s, deterministic flaky 500s. In-memory catalog, no volume.
+  rest-mock:
+    build: ./rest-mock
+    image: helios/rest-mock:latest
+    container_name: helios-rest-mock
+    environment:
+      REST_MOCK_FLAKE_PERCENT: ${REST_MOCK_FLAKE_PERCENT:-5}
+      REST_MOCK_FLAKE_SEED: ${REST_MOCK_FLAKE_SEED:-42}
+      REST_MOCK_RATE_CAPACITY: ${REST_MOCK_RATE_CAPACITY:-30}
+      REST_MOCK_RATE_REFILL_PER_SEC: ${REST_MOCK_RATE_REFILL_PER_SEC:-10}
+    ports:
+      - "${REST_MOCK_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
     restart: unless-stopped
 
   airflow-db:

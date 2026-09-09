@@ -38,6 +38,18 @@ runs before `oltp-mutator` starts; ~3.5 min at default scale — `WAIT_TIMEOUT` 
 to 900 s to cover it). The mutator writes continuously (updates + bounded inserts/
 deletes) precisely so Phase-2 CDC sees WAL churn; `make oltp-status` is the instrument.
 
+Phase 1 additions (rest-mock, ADR-003):
+
+| Command | Effect |
+|---|---|
+| `make test-rest` | pytest suite (34 tests) in a throwaway container |
+| `make smoke-rest` | Walks every `/promotions` page against the running service; retries real 429s/500s; asserts no dupes/gaps |
+
+Tuning knobs in `.env`: `REST_MOCK_FLAKE_PERCENT` (default 5; set 100 to force failures
+while debugging an extractor, 0 to silence), `REST_MOCK_RATE_CAPACITY` /
+`REST_MOCK_RATE_REFILL_PER_SEC` (default 30 / 10 per second). Send an `X-API-Key`
+header to get an isolated rate bucket.
+
 ## 2. Endpoints & credentials
 
 All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:

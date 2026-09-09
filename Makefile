@@ -4,7 +4,7 @@ COMPOSE := docker compose
 ENV_FILE := .env
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -60,6 +60,12 @@ test-oltp: ## Run oltp seeder/mutator tests in a throwaway container (dedicated 
 
 mutator-logs: ## Follow the oltp-mutator mutation-loop logs
 	$(COMPOSE) logs -f --tail 50 oltp-mutator
+
+test-rest: ## Run rest-mock unit tests in a throwaway container
+	docker compose run --rm rest-mock pytest
+
+smoke-rest: ## Walk ALL /promotions pages against the running rest-mock (retries 429/500)
+	docker compose exec -T rest-mock python /app/smoke_client.py
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v
