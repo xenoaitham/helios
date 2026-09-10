@@ -12,6 +12,8 @@
 #   oltp-mutator   continuous updates+deletes on the OLTP source (CDC fuel, ADR-002)
 #   rest-mock      Pricing & Promotions mock API: paging, 429s, flaky 500s (ADR-003)
 #   filedrop-tools one-shot tool: nightly CSV feeds with dirt into a drop volume (ADR-004)
+#   cdc-connect    Kafka Connect + Debezium Postgres connector — reads oltp WAL (ADR-005)
+#   cdc-sink       Python consumer: lsn-guarded (lsn, pk) upserts into warehouse raw (ADR-005)
 #
 # All credentials come from .env (see .env.example).
 
@@ -37,6 +39,10 @@ services:
   oltp-db:
     image: postgres:16-alpine
     container_name: helios-oltp-db
+    # ADR-005: logical decoding for Debezium CDC. Command override only — the
+    # data volume is NOT rebuilt (wal_level is a startup parameter). max_wal_senders/
+    # max_replication_slots defaults (10/10) suffice for the single CDC slot.
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
       POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
@@ -176,6 +182,81 @@ services:
     command: python -m filedrop.generate --report
     restart: "no"
     profiles: ["tools"]
+
+  # Phase 2 movement (ADR-005): Kafka Connect + Debezium Postgres connector.
+  # Captures public.{users,orders,order_items,payments} from the oltp WAL via
+  # pgoutput (slot helios_cdc_slot, publication helios_publication) into topics
+  # helios.public.<table>. Connector config is registered idempotently by cdc-sink.
+  cdc-connect:
+    image: quay.io/debezium/connect:3.1.3.Final
+    container_name: helios-cdc-connect
+    ports:
+      - "${CDC_CONNECT_PORT:-8083}:8083"
+    environment:
+      # In-network listener; HOST listener (localhost:29092) is for host tooling only.
+      # Env names follow the Debezium image contract (its entrypoint translates
+      # CONNECT_X_Y env vars into worker property x.y; short names are its own).
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: helios-connect-cluster
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: ${KAFKA_CONNECT_HEAP_OPTS:--Xms256M -Xmx768M}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "printf 'GET /connectors HTTP/1.0\\r\\n\\r\\n' >/dev/tcp/localhost/8083"]
+      interval: 10s
+      timeout: 10s
+      retries: 24
+      start_period: 60s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      oltp-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Phase 2 movement (ADR-005): the raw-zone sink. Python consumer applying
+  # Debezium events into warehouse raw.cdc_users/orders/order_items/payments with
+  # lsn-guarded upserts (idempotent by (lsn, pk)). Registers the connector on
+  # startup, ensures the raw DDL, commits offsets only after a batch is applied.
+  cdc-sink:
+    build: ./cdc-sink
+    image: helios/cdc-sink:latest
+    container_name: helios-cdc-sink
+    environment:
+      CDC_KAFKA_BOOTSTRAP: kafka:9092
+      CDC_GROUP_ID: helios-cdc-sink
+      CDC_TOPIC_PREFIX: helios
+      CDC_CONNECT_URL: http://cdc-connect:8083
+      CDC_HEALTH_PORT: "8081"
+      CDC_DB_USER: ${CDC_DB_USER:-helios_cdc}
+      CDC_DB_PASSWORD: ${CDC_DB_PASSWORD:-cdc_local_dev}
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      # verify.py needs source-side reads/writes for the DoD checks (make cdc-verify).
+      OLTP_POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      OLTP_POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      OLTP_POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      warehouse-db:
+        condition: service_healthy
+      cdc-connect:
+        condition: service_healthy
+    restart: unless-stopped
 
   airflow-db:
     image: postgres:16-alpine

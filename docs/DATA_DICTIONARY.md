@@ -28,7 +28,9 @@ Legacy order system (ADR-001). SQLite store on the `soap_data` volume, table/col
 shape below; the SOAP contract (`soap-service/contract/OrderManagement.wsdl`) exposes a
 subset. All timestamps are naive UTC `YYYY-MM-DD HH:MM:SS`. Money is stored as integer
 cents and presented as `Decimal(2dp)` in the SOAP contract — no float money.
-Raw/staging/mart destinations are filled in when Phase 2/3 land the extraction.
+Raw/staging/mart destinations are filled in when Phase 2/3 land the extraction. The
+**CDC landing tables** below arrived with Phase 2 (ADR-005); the rest follow with the
+ingest lib (Phase 2) and dbt staging (Phase 3).
 
 `orders` (~382k rows seeded):
 
@@ -163,3 +165,25 @@ sources), supplier_code (SUP-A..D) — PII class: none.
 PII statement for this source: the **customers feed is the batch-feed PII surface** —
 email + full_name must be hashed at staging exactly like the OLTP `users` columns; the
 products feed carries no identifiers.
+
+## Warehouse raw zone — CDC landing tables (Phase 2, ADR-005)
+
+`raw.cdc_users`, `raw.cdc_orders`, `raw.cdc_order_items`, `raw.cdc_payments` — one per
+OLTP source table, populated by `cdc-sink` from Debezium envelopes (topics
+`helios.public.<table>`). Raw stays *source-shaped and as-landed*: money arrives as
+strings (`decimal.handling.mode=string`), timestamps as ISO-8601 strings; casting to
+typed columns is Phase-3 staging's job.
+
+| Column | Type | Null | Notes | PII class |
+|---|---|---|---|---|
+| pk | JSONB PRIMARY KEY | no | Debezium key payload, e.g. `{"user_id": 42}` — uniform for any future composite key | inherits the source PK (none) |
+| lsn | BIGINT | no | WAL log sequence number of the change (snapshot rows carry the snapshot LSN); the sink's idempotency guard is `WHERE EXCLUDED.lsn >= table.lsn` | none |
+| op | TEXT | no | `r` snapshot read / `c` create / `u` update / `d` delete-tombstone | none |
+| ts_ms | BIGINT | no | source commit timestamp (epoch ms) | none |
+| before / after | JSONB | yes | Debezium before/after images; `after` IS NULL exactly when `op='d'` | same as the source columns they mirror (see source tables above; users email/full_name are the PII surface) |
+| landed_at | TIMESTAMPTZ | no | when the sink applied the event (defaults to `now()`) | none |
+
+Row-count semantics: one row per PK ever captured — deletes stay as `op='d'`
+tombstone rows (staging filters them in Phase 3), so
+`count(*) WHERE op <> 'd'` tracks the live source row count (verified equal in
+`make cdc-verify` stage [2]).

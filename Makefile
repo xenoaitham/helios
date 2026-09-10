@@ -4,7 +4,7 @@ COMPOSE := docker compose
 ENV_FILE := .env
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -78,6 +78,18 @@ drop-ls: ## List the SFTP-style drop volume (files, sizes, arrival times)
 
 test-drop: ## Run file-drop dirt/CLI tests in a throwaway container
 	docker compose run --rm filedrop-tools pytest
+
+cdc-setup: ## CDC bootstrap: wal_level=logical on oltp-db + replication role (idempotent; ADR-005)
+	bash scripts/cdc-setup.sh
+
+cdc-status: ## CDC control plane: connector state, sink lag, slot retention, raw counts
+	docker compose run --rm cdc-sink python -m cdc.status
+
+cdc-verify: ## ADR-005 DoD verification: baseline match, marker latency, replay safety (stops mutator temporarily)
+	bash scripts/cdc-verify.sh
+
+test-cdc: ## Run cdc-sink tests in a throwaway container (dedicated cdc_test db on warehouse-db)
+	docker compose run --rm cdc-sink pytest
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

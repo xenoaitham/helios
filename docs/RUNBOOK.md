@@ -111,6 +111,39 @@ make clean && make up && make ps   # expect: all healthy, schemas re-created
 
 This is the exact drill `EVIDENCE/phase-0.md` records.
 
+## 4b. CDC operations (Phase 2, ADR-005)
+
+The capture path is `oltp-db (wal_level=logical) → cdc-connect (Debezium, pgoutput)
+→ Kafka topics helios.public.<table> → cdc-sink → warehouse raw.cdc_<table>`.
+The sink registers the connector idempotently on every start, so a plain
+`make up` brings the whole path up; `make cdc-setup` is only needed when the
+role/publication don't exist yet (fresh volume) or `wal_level` was reset.
+
+| Task | Command | Notes |
+|---|---|---|
+| One-time bootstrap (wal_level, role, publication) | `make cdc-setup` | idempotent; recreates oltp-db container (volume preserved) |
+| Control-plane report | `make cdc-status` | connector state, per-topic lag, slot retention, raw counts |
+| DoD verification (baseline, marker latency, replay safety) | `make cdc-verify` | stops `oltp-mutator` for a controlled window, restarts it after |
+
+**Replication slot retention — the one thing that can hurt this stack.** While
+the sink or Connect is down, the `helios_cdc_slot` pins WAL on `oltp-db` and
+`pg_wal` grows. `make cdc-status` shows `retained_wal`; if it grows past a few
+hundred MB, bring the sink back (`docker compose start cdc-sink`) and let it
+drain. In a genuine emergency (source disk at risk), the slot can be dropped
+(`SELECT pg_drop_replication_slot('helios_cdc_slot')`) — the connector then
+resnapshots on next start; data captured in between is lost (batch sources are
+unaffected). This is a documented manual intervention, not a routine step.
+
+Replay semantics: raw.cdc_<table> rows are guarded by
+`WHERE EXCLUDED.lsn >= table.lsn`, so re-consuming any Kafka range (offset
+reset, group deletion, full re-drain after `TRUNCATE raw.cdc_*`) converges to
+the same state without dupes. `make cdc-verify` stage [4] proves it live.
+
+Schema drift: adding a column to an oltp table lands in the Debezium envelopes
+automatically (JSONB `after` in raw); dropping/renaming needs the publication
+member list refreshed (`make cdc-setup` re-adds the four known tables) and is a
+Phase-5 chaos scenario.
+
 ## 5. Environment notes (this repo's dev machine)
 
 The baseline was built on a host where the system Docker daemon is disabled and sudo is

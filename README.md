@@ -15,7 +15,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 |---|---|---|
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
 | 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
-| 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ⬜ |
+| 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | 🔄 CDC done — [EVIDENCE/phase-2-cdc.md](EVIDENCE/phase-2-cdc.md) / [ADR-005](DECISIONS/adr-005-cdc.md); ingest lib next |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
 | 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
 | 5 | Chaos & performance: `make chaos-test`, `make bench` | ⬜ |
@@ -65,9 +65,11 @@ flowchart LR
     end
 
     subgraph MOVE["Ingestion and movement (Ph.2)"]
-        DEB["Debezium CDC"]
-        KAFKA[("Kafka KRaft<br/>single broker")]
+        DEB["cdc-connect: Debezium<br/>Postgres connector (pgoutput)<br/>logical slot helios_cdc_slot"]
+        KAFKA[("Kafka KRaft<br/>single broker<br/>topics helios.public.*")]
+        SINK["cdc-sink (Ph.2)<br/>lsn-guarded upserts<br/>idempotent by (lsn, pk)"]
         ING["ingest lib<br/>watermarks - retry/backoff"]
+        DEB --> KAFKA --> SINK --> RAW
     end
 
     subgraph WH["Warehouse Postgres"]

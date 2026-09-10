@@ -3,7 +3,8 @@
 #
 # Stage 1 (infra): every container healthy AND answering a real query
 #                  (SQL on each Postgres, topic list on Kafka, /health on Airflow,
-#                  authenticated WSDL + enforced 401 on soap-service).
+#                  authenticated WSDL + enforced 401 on soap-service; Phase 2 adds
+#                  wal_level=logical + the Debezium connector state — ADR-005).
 # Stage 2 (E2E):  seed -> run-etl -> mart/SCD2 SQL assertions.
 #                 NOT IMPLEMENTED until Phase 3 — Stage 2 must fail LOUDLY today;
 #                 that is the expected behaviour by definition-of-done (STATE.md).
@@ -18,7 +19,7 @@ STAGE1_FAIL=0
 
 echo "===== Stage 1: infrastructure ====="
 
-for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service; do
+for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service cdc-connect cdc-sink; do
   status="$(docker inspect -f '{{.State.Health.Status}}' "helios-${svc}" 2>/dev/null || echo missing)"
   if [ "$status" = "healthy" ]; then
     echo "[ok]   container $svc healthy"
@@ -76,6 +77,20 @@ if docker exec helios-soap-service python /app/check_contract.py --expect-unauth
   echo "[ok]   soap-service rejects unauthenticated requests (401)"
 else
   echo "[FAIL] soap-service auth not enforced"; STAGE1_FAIL=1
+fi
+
+# --- Phase 2 (ADR-005): CDC capture path ---
+wal_level="$(docker exec helios-oltp-db psql -U "$OLTP_USER" -d "$OLTP_DB" -tAc "SHOW wal_level" 2>/dev/null || echo unknown)"
+if [ "$wal_level" = "logical" ]; then
+  echo "[ok]   oltp-db wal_level=logical (CDC capture enabled)"
+else
+  echo "[FAIL] oltp-db wal_level=$wal_level (expected logical — run make cdc-setup)"; STAGE1_FAIL=1
+fi
+
+if docker exec helios-cdc-sink python -c "import urllib.request,json,sys;r=json.load(urllib.request.urlopen('http://cdc-connect:8083/connectors/helios-oltp/status',timeout=5));sys.exit(0 if r.get('connector',{}).get('state')=='RUNNING' else 1)" >/dev/null 2>&1; then
+  echo "[ok]   Debezium connector helios-oltp RUNNING"
+else
+  echo "[FAIL] Debezium connector helios-oltp not RUNNING (see make cdc-status)"; STAGE1_FAIL=1
 fi
 
 echo
