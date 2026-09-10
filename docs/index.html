@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HELIOS - legacy to lakehouse ETL platform</title>
+<meta name="description" content="A containerized enterprise data platform: SOAP, flat files, REST and CDC into a governed dimensional warehouse. Personal portfolio project.">
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #070b16; color: #c9d1d9;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 40px 0 10px; }
+  .hero { border-radius: 16px; overflow: hidden; border: 1px solid #1f2735; }
+  .hero img { display: block; width: 100%; height: auto; }
+  h1 { font-size: 28px; color: #ffd76a; margin: 34px 0 8px; letter-spacing: .5px; }
+  h2 { font-size: 19px; color: #e8edf6; margin: 34px 0 10px; border-bottom: 1px solid #1f2735; padding-bottom: 8px; }
+  p.lead { font-size: 17px; color: #b7c4dc; }
+  .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+  a { color: #79c0ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 14px; }
+  .card { background: #10151f; border: 1px solid #1f2735; border-radius: 10px; padding: 14px 16px; }
+  .card b { color: #ffd76a; display: block; margin-bottom: 4px; font-size: 15px; }
+  .card span { font-size: 14px; color: #8fa3c4; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 15px; }
+  td, th { border: 1px solid #1f2735; padding: 8px 12px; text-align: left; }
+  th { color: #8fa3c4; font-weight: 600; background: #10151f; }
+  pre {
+    background: #0d1117; border: 1px solid #1f2735; border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 14px; margin-top: 12px;
+  }
+  footer { margin: 50px 0 30px; color: #7385a3; font-size: 14px; }
+  .shot { border-radius: 12px; border: 1px solid #1f2735; width: 100%; height: auto; margin-top: 12px; }
+  .tag { display: inline-block; background: #10151f; border: 1px solid #2a3547; color: #cfe0ff;
+         border-radius: 999px; padding: 4px 12px; font-size: 13px; margin: 4px 6px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="hero"><img src="assets/helios-card.png" alt="HELIOS project card"></div>
+  </header>
+
+  <h1>a legacy enterprise, in a compose file</h1>
+  <p class="lead">
+    HELIOS modernizes four "legacy" sources - a SOAP OrderManagement service, nightly CSV
+    drops, a flaky REST API and a busy OLTP database - into a governed dimensional
+    warehouse, with Debezium CDC, Airflow, dbt, quality gates and lineage still to come.
+    Personal portfolio project: every number below is reproducible with a make target.
+  </p>
+  <div style="margin-top:10px">
+    <span class="tag">SOAP 1.1 / spyne</span><span class="tag">Postgres x2</span>
+    <span class="tag">FastAPI</span><span class="tag">Kafka KRaft</span><span class="tag">Airflow 2.10</span>
+    <span class="tag">rootless docker</span>
+  </div>
+
+  <h2>what runs right now (phase 1: sources)</h2>
+  <div class="grid">
+    <div class="card"><b>soap-service :8000</b><span>OrderManagement, basic auth, 382k orders (3y), idempotent creates, frozen WSDL contract, zeep smoke client</span></div>
+    <div class="card"><b>oltp + mutator</b><span>normalized 4-table schema, 5.4M rows loaded in one atomic COPY (199s), continuous mutations churning ~232 KB/s of WAL</span></div>
+    <div class="card"><b>rest-mock :8001</b><span>cursor pagination, token-bucket 429s with Retry-After, deterministic flaky 500s</span></div>
+    <div class="card"><b>file-drop</b><span>nightly CSVs with real dirt: duplicate rows, ragged columns, cp1252-in-UTF8, late batches</span></div>
+  </div>
+
+  <img class="shot" src="assets/build-panes.png" alt="HELIOS phase 1 build - four terminal panes with real command output">
+
+  <h2>scoreboard (all measured, evidence in the repo)</h2>
+  <table>
+    <tr><th>metric</th><th>value</th></tr>
+    <tr><td>tests</td><td>110 green across 4 suites, run in containers</td></tr>
+    <tr><td>oltp data</td><td>5,399,992 rows / ~558 MB, single-transaction load</td></tr>
+    <tr><td>WAL churn</td><td>3.48 MB per 15s (~232 KB/s) for Debezium to consume</td></tr>
+    <tr><td>smoke gate</td><td>stage 1: 15/15 checks, 9 containers healthy</td></tr>
+    <tr><td>ADRs</td><td>4 (soap contract, oltp seeder, rest-mock, file-drop)</td></tr>
+    <tr><td>build time</td><td>6h26m across two sittings</td></tr>
+  </table>
+
+  <h2>run it yourself</h2>
+  <pre class="mono">git clone https://github.com/MayonaiseLover/helios.git
+cd helios
+make up          # 9 containers, wait-gated on health
+make smoke-test  # stage 1: 15/15 (stage 2 fails loudly by design until phase 3)
+make oltp-status # row counts + live WAL churn measurement
+make smoke-rest  # full pagination walk, retrying real 429s/500s</pre>
+
+  <h2>dig deeper</h2>
+  <p>
+    <a href="https://github.com/MayonaiseLover/helios">the repo</a> &#183;
+    <a href="https://github.com/MayonaiseLover/helios/blob/main/devlogs/devlog-001-phase1-sources.md">devlog #1</a> &#183;
+    <a href="https://github.com/MayonaiseLover/helios/tree/main/EVIDENCE">evidence logs</a> &#183;
+    <a href="https://github.com/MayonaiseLover/helios/tree/main/DECISIONS">ADRs</a> &#183;
+    <a href="https://github.com/MayonaiseLover/helios/blob/main/docs/RUNBOOK.md">runbook</a>
+  </p>
+
+  <footer>
+    personal portfolio project by a solution architect candidate, built in the open, one phase at a time.
+    next: Debezium CDC from the OLTP WAL into Kafka.
+  </footer>
+
+</div>
+</body>
+</html>
