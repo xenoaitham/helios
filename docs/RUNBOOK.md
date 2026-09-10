@@ -64,6 +64,25 @@ same inputs give byte-identical files; re-running the same batch date overwrites
 place. The drop volume grows until cleaned — targeted `docker compose run --rm
 filedrop-tools sh -c "rm /data/drop/<file>"` or `make down -v` (destroys ALL data).
 
+Phase 2 additions (ingest lib, ADR-006/007):
+
+| Command | Effect |
+|---|---|
+| `make ingest-soap` | Windowed GetOrders pull (`[watermark − 7d, now]`), lands into `raw.soap_orders` |
+| `make ingest-file` | Processes new/changed CSVs in the drop volume (hash ledger); rejects go to `raw.ingest_quarantine` |
+| `make ingest-rest` | Full cursor walk of `/products` + `/promotions` (expects 429s; honors `Retry-After`) |
+| `make ingest-all` | All three extractors, one shot |
+| `make ingest-status` | Watermarks, landed counts, file ledger, quarantine summary, run ledger |
+| `make test-ingest` | 54 pytest tests in a throwaway container (dedicated `ingest_test` db) |
+
+Notes: extractors are one-shot tools (Airflow schedules them in Phase 3). Re-landing
+identical content is a physical no-op (content-hash-guarded upserts) — rerunning
+anything is always safe. SOAP first-ever run pulls full history (~382k orders,
+~2.5 min measured); subsequent runs pull only the overlap window (~4 s measured).
+Old-order status changes need `--full` (the API filters on `created_at` only).
+Quarantine triage: `make ingest-status` shows reason + physical row number; fix the
+source file and regenerate — the hash change re-lands it on the next run.
+
 ## 2. Endpoints & credentials
 
 All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:

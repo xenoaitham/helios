@@ -4,7 +4,7 @@ COMPOSE := docker compose
 ENV_FILE := .env
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -90,6 +90,24 @@ cdc-verify: ## ADR-005 DoD verification: baseline match, marker latency, replay 
 
 test-cdc: ## Run cdc-sink tests in a throwaway container (dedicated cdc_test db on warehouse-db)
 	docker compose run --rm cdc-sink pytest
+
+ingest-soap: ## One-shot SOAP extract: windowed GetOrders pull (ADR-006 watermark)
+	docker compose run --rm ingest python -m ingest.run --source soap
+
+ingest-file: ## One-shot file-drop extract: CSV feeds with quarantine (ADR-006/007)
+	docker compose run --rm ingest python -m ingest.run --source file
+
+ingest-rest: ## One-shot REST extract: full cursor walk of products+promotions
+	docker compose run --rm ingest python -m ingest.run --source rest
+
+ingest-all: ## One-shot run of all three extractors
+	docker compose run --rm ingest
+
+ingest-status: ## Watermarks, landed counts, file ledger, quarantine, run ledger
+	docker compose run --rm ingest python -m ingest.status
+
+test-ingest: ## Run ingest lib tests in a throwaway container (dedicated ingest_test db)
+	docker compose run --rm ingest pytest
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

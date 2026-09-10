@@ -15,7 +15,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 |---|---|---|
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
 | 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
-| 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | 🔄 CDC done — [EVIDENCE/phase-2-cdc.md](EVIDENCE/phase-2-cdc.md) / [ADR-005](DECISIONS/adr-005-cdc.md); ingest lib next |
+| 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done — [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
 | 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
 | 5 | Chaos & performance: `make chaos-test`, `make bench` | ⬜ |
@@ -180,7 +180,8 @@ soap-service/          (Ph.1 ✅) legacy SOAP OrderManagement: spyne, basic auth
 rest-mock/             (Ph.1 ✅) flaky REST pricing API: cursor paging, 429s, seeded 500s (ADR-003)
 file-drop/             (Ph.1 ✅) nightly CSV drop zone + dirty-file generator (ADR-004)
 oltp/                  (Ph.1 ✅) OLTP schema + 5.4M-row COPY seeder + mutation loop (ADR-002)
-ingest/                (Ph.2) shared extraction library (watermarks, retries)
+ingest/                (Ph.2 ✅) batch extractors: watermark cursors, Retry-After
+                       backoff, content-hash idempotent raw landing, quarantine (ADR-006/007)
 dags/                  (Ph.3) Airflow DAGs
 dbt/                   (Ph.3) dbt project: staging -> marts
 dq/                    (Ph.4) Great Expectations suites + quarantine

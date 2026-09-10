@@ -14,6 +14,8 @@
 #   filedrop-tools one-shot tool: nightly CSV feeds with dirt into a drop volume (ADR-004)
 #   cdc-connect    Kafka Connect + Debezium Postgres connector — reads oltp WAL (ADR-005)
 #   cdc-sink       Python consumer: lsn-guarded (lsn, pk) upserts into warehouse raw (ADR-005)
+#   ingest         one-shot batch extractors: SOAP/file/REST -> raw with watermark
+#                  cursors + content-hash idempotency + quarantine (ADR-006/007)
 #
 # All credentials come from .env (see .env.example).
 
@@ -306,6 +308,39 @@ services:
       retries: 15
       start_period: 20s
     restart: unless-stopped
+
+  # Phase 2 movement (ADR-006/007): one-shot batch extractors — SOAP windowed
+  # GetOrders, file-drop CSV feeds with quarantine, REST cursor walks — landing
+  # into per-source raw tables with content-hash-guarded upserts (idempotent:
+  # crash-replay leaves no dupes). A TOOL like filedrop-tools (profiles gate it
+  # out of `make up`); Airflow orchestrates these runs in Phase 3.
+  ingest:
+    build: ./ingest
+    image: helios/ingest:latest
+    container_name: helios-ingest
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      INGEST_SOAP_BASE_URL: http://soap-service:8000
+      SOAP_BASIC_AUTH_USER: ${SOAP_BASIC_AUTH_USER:-soap_local_dev}
+      SOAP_BASIC_AUTH_PASSWORD: ${SOAP_BASIC_AUTH_PASSWORD:-soap_local_dev}
+      INGEST_REST_BASE_URL: http://rest-mock:8000
+      INGEST_FILEDROP_DIR: /data/drop
+    volumes:
+      # read-only: the extractor never writes into the source's drop zone
+      # (rejects go to the raw.ingest_quarantine table — ADR-007).
+      - filedrop_data:/data/drop:ro
+    command: python -m ingest.run --source all
+    depends_on:
+      warehouse-db:
+        condition: service_healthy
+      soap-service:
+        condition: service_healthy
+      rest-mock:
+        condition: service_healthy
 
   airflow-init:
     <<: *airflow-common
