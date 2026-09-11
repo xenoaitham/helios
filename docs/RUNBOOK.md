@@ -1,6 +1,6 @@
 # RUNBOOK — operating HELIOS
 
-Grows each phase (currently Phase 1). Audience: a stranger with the repo and Docker.
+Grows each phase (currently Phase 3). Audience: a stranger with the repo and Docker.
 
 ## 1. Daily driver commands
 
@@ -82,6 +82,26 @@ anything is always safe. SOAP first-ever run pulls full history (~382k orders,
 Old-order status changes need `--full` (the API filters on `created_at` only).
 Quarantine triage: `make ingest-status` shows reason + physical row number; fix the
 source file and regenerate — the hash change re-lands it on the next run.
+
+Phase 3 additions (dbt staging, ADR-008):
+
+| Command | Effect |
+|---|---|
+| `make dbt-build` | Rebuild image + `dbt build`: 9 typed staging models over raw + 81 data tests (one unit) |
+| `make dbt-test` | Rebuild image + `dbt test` standalone (same 81 tests) |
+| `make dbt-freshness` | `dbt source freshness` — CDC warn 2 min / error 10 min; batch warn 26 h / error 50 h |
+| `make dbt-image` | Build `helios/dbt:latest` only (dbt-core 1.9.11 + dbt-postgres 1.9.1 pinned) |
+
+Notes: models are TABLES rebuilt full each run (~33 s; `stg_order_items` ~4.3M rows
+is the long pole) — CDC current state is `op <> 'd'` over the raw envelopes, and
+staging keeps `_cdc_lsn`/`_batch_ref` provenance. PII (`users` and `file_customers`
+email/full_name) becomes `*_hash` = SHA-256(lower(trim(v)) || `PII_HASH_SALT`)
+here; raw keeps cleartext, marts must never receive it (item 8). Rotating
+`PII_HASH_SALT` invalidates every staging hash at once (ADR-008). Two gotchas a
+stranger will hit: (1) code is baked into the image — the make targets rebuild it
+first, never run a stale image; (2) when staging/raw counts "disagree", check
+`make cdc-status` lag first — the sink draining a backlog (or simply applying
+events mid-build) moves raw underneath you; a mutator pause is NOT a raw freeze.
 
 ## 2. Endpoints & credentials
 

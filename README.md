@@ -183,7 +183,8 @@ oltp/                  (Ph.1 ✅) OLTP schema + 5.4M-row COPY seeder + mutation 
 ingest/                (Ph.2 ✅) batch extractors: watermark cursors, Retry-After
                        backoff, content-hash idempotent raw landing, quarantine (ADR-006/007)
 dags/                  (Ph.3) Airflow DAGs
-dbt/                   (Ph.3) dbt project: staging -> marts
+dbt/                   (Ph.3 ✅ staging) dbt project: 9 typed staging models over raw,
+                       PII hashing (SHA-256 + env salt), freshness + 81 tests (ADR-008)
 dq/                    (Ph.4) Great Expectations suites + quarantine
 observability/         (Ph.4) Prometheus/Grafana config, Marquez
 DECISIONS/             ADRs — why the platform looks like this

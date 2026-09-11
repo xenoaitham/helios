@@ -16,6 +16,8 @@
 #   cdc-sink       Python consumer: lsn-guarded (lsn, pk) upserts into warehouse raw (ADR-005)
 #   ingest         one-shot batch extractors: SOAP/file/REST -> raw with watermark
 #                  cursors + content-hash idempotency + quarantine (ADR-006/007)
+#   dbt            one-shot dbt build/test/freshness: raw -> typed staging with
+#                  PII hashing + a shared per-run CDC cut (ADR-008)
 #
 # All credentials come from .env (see .env.example).
 
@@ -340,6 +342,26 @@ services:
       soap-service:
         condition: service_healthy
       rest-mock:
+        condition: service_healthy
+
+  # Phase 3 warehouse (ADR-008): dbt staging models over the raw zone. One-shot
+  # TOOL like ingest (profiles gate it out of `make up`); Airflow orchestrates
+  # dbt in item 9. All credentials via env — profiles.yml uses env_var() only.
+  # Code is baked into the image: `docker compose build dbt` after any change
+  # (the make dbt-* targets depend on dbt-image for exactly this).
+  dbt:
+    build: ./dbt
+    image: helios/dbt:latest
+    container_name: helios-dbt
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      PII_HASH_SALT: ${PII_HASH_SALT:-helios_local_dev_pii_salt}
+    depends_on:
+      warehouse-db:
         condition: service_healthy
 
   airflow-init:

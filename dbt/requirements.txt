@@ -1,0 +1,5 @@
+# HELIOS dbt image (ADR-008 D5): pinned to the current stable 1.9.x line,
+# adapter and core on matching minors. Exact versions recorded in
+# EVIDENCE/phase-3-staging.md. No dbt packages — the project is hermetic.
+dbt-core==1.9.11
+dbt-postgres==1.9.1

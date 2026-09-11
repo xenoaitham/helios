@@ -4,7 +4,7 @@ COMPOSE := docker compose
 ENV_FILE := .env
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -108,6 +108,21 @@ ingest-status: ## Watermarks, landed counts, file ledger, quarantine, run ledger
 
 test-ingest: ## Run ingest lib tests in a throwaway container (dedicated ingest_test db)
 	docker compose run --rm ingest pytest
+
+# --- Phase 3: dbt staging (ADR-008). One-shot tool image, baked-in code: every
+# target rebuilds the image first (cached no-op when unchanged) so a project
+# edit can never be missed by a run.
+dbt-image: ## Build the dbt tool image (pinned dbt-core/dbt-postgres 1.9.x)
+	docker compose build dbt
+
+dbt-build: dbt-image ## dbt build: staging models + tests (shared per-run CDC cut)
+	docker compose run --rm dbt build
+
+dbt-test: dbt-image ## dbt test: the staging test contract, standalone
+	docker compose run --rm dbt test
+
+dbt-freshness: dbt-image ## dbt source freshness (per-cadence thresholds, ADR-008 D4)
+	docker compose run --rm dbt source freshness
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

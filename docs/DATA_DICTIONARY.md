@@ -187,3 +187,29 @@ Row-count semantics: one row per PK ever captured — deletes stay as `op='d'`
 tombstone rows (staging filters them in Phase 3), so
 `count(*) WHERE op <> 'd'` tracks the live source row count (verified equal in
 `make cdc-verify` stage [2]).
+
+## Warehouse staging schema (Phase 3, ADR-008) — dbt's first tenant
+
+Nine dbt models, materialized as tables and rebuilt full on every
+`make dbt-build`; CDC current state = `op <> 'd'` over the raw envelopes; batch
+payloads extracted + typed. Provenance: CDC models carry `_cdc_lsn`, batch models
+`_batch_ref` (joins to the ADR-007 run ledger). Models: `stg_users`,
+`stg_orders`, `stg_order_items`, `stg_payments`, `stg_soap_orders`,
+`stg_file_customers`, `stg_file_products`, `stg_rest_products`,
+`stg_rest_promotions`.
+
+PII mechanics (ADR-008 D1): `email` and `full_name` (OLTP `users` + file
+`customers` feeds) appear in staging **only** as
+`email_hash` / `full_name_hash` =
+`SHA-256(lower(trim(value)) || PII_HASH_SALT)` (lowercase hex, pgcrypto; salt
+from `.env`, never committed). Determinism is the point: the same cleartext
+hashes identically across feeds and runs (7 cross-feed email pairs verified
+equal at Phase 3 open), which is what item 8's SCD2 needs. Rotating the salt
+invalidates every hash at once. Raw keeps cleartext; marts must never receive
+it (Phase 4 DQ gate re-checks).
+
+Known namespace skew (measured, not a defect): OLTP items reference 100,000
+distinct `product_sku` values while the product catalogs (REST ∪ file) cover
+6,895 of them — the catalog is a subset of the SKU namespace by seed design.
+`stg_rest_promotions.product_sku → catalog` IS total (0 missing) and is
+asserted by a dbt test; items→catalog is deliberately not asserted.
