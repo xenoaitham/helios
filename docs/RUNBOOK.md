@@ -183,6 +183,24 @@ automatically (JSONB `after` in raw); dropping/renaming needs the publication
 member list refreshed (`make cdc-setup` re-adds the four known tables) and is a
 Phase-5 chaos scenario.
 
+### Snapshot protection (Phase 3 item 8, ADR-009)
+
+`snapshots.customers_snapshot` is the SCD2 history store — the only dbt
+relation whose state persists across builds.
+
+- NEVER run the marts build with `--full-refresh`: a snapshot full-refresh
+  drops and re-creates it from current state = instant history wipe.
+  `make dbt-build` is deliberately a plain `dbt build` — keep it that way.
+- NEVER `drop schema snapshots` / truncate the table outside `make clean`
+  (which wipes everything and reseeds).
+- History starts at the snapshot's first run; a normal `dbt build` only ever
+  appends versions (quiet run logs `INSERT 0 0`). Verify with:
+  `select min(dbt_valid_from), count(*) from snapshots.customers_snapshot;`
+  (min must never move forward between builds).
+- Rotating `PII_HASH_SALT` invalidates every staging hash at once → the next
+  build would record ~50 k "changes". Treat salt rotation as a destructive,
+  planned event: rotate AND consciously rebuild the snapshot from scratch.
+
 ## 5. Environment notes (this repo's dev machine)
 
 The baseline was built on a host where the system Docker daemon is disabled and sudo is

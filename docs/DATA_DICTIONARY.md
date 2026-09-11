@@ -213,3 +213,40 @@ distinct `product_sku` values while the product catalogs (REST ∪ file) cover
 6,895 of them — the catalog is a subset of the SKU namespace by seed design.
 `stg_rest_promotions.product_sku → catalog` IS total (0 missing) and is
 asserted by a dbt test; items→catalog is deliberately not asserted.
+
+## Warehouse marts schema + snapshots (Phase 3 item 8, ADR-009)
+
+Star schema built from staging only (`ref()` — never raw). Facts and dims are
+tables rebuilt on every `make dbt-build`; the ONE persistent relation is the
+dbt snapshot `snapshots.customers_snapshot` (check strategy over
+`[email_hash, full_name_hash, country_code, is_active]`; `last_login_at`
+deliberately excluded — the mutator touches it ~40 users/tick and would
+fabricate versions). `make dbt-build` is never run with `--full-refresh`
+(a snapshot full-refresh wipes history); `make clean` is the only sanctioned
+wipe.
+
+- `snapshots.customers_snapshot` — SCD2 state, one row per (user_id, version):
+  hashed attrs + dbt metadata (`dbt_scd_id`, `dbt_valid_from/to`,
+  `dbt_updated_at`). History begins at first run (2026-09-11).
+- `marts.dim_customer` — one row per customer version; `customer_sk` =
+  `dbt_scd_id`, `customer_id` = user_id, half-open `[valid_from, valid_to)`,
+  `is_current` = (`valid_to IS NULL`). email/full_name → `*_hash`
+  (`pseudonymized`, same ADR-008 formula). Everything else `none`.
+- `marts.dim_product` — SCD1, natural key `sku`, rest∪file union (REST
+  precedence on the 105-SKU overlap), `price_cents` stays integer cents,
+  `source_feed` ∈ {rest, file}. PII `none`.
+- `marts.dim_date` — generated calendar, `date_key` = YYYYMMDD int, day grain
+  spanning the order timelines. PII `none`.
+- `marts.fct_orders` — grain `(source_type, order_id)` (namespaces collide:
+  350,876 OLTP rows measured sharing an id with SOAP — composite uniqueness is
+  tested). OLTP rows resolve `customer_sk` by SCD2 point-in-time window
+  (orders older than snapshot history fall back to the earliest known version
+  — documented limitation); SOAP rows carry the Kimball unknown member
+  (`customer_sk IS NULL` — SOAP has no identity attribute to resolve). PII
+  `none`.
+- `marts.fct_order_items` — line grain `order_item_id`; carries the order's
+  resolved `customer_sk` + `order_date_key`, `product_sku` (dim join is LEFT:
+  ~6.89 % of rows match the catalog by seed design; unmatched = NULL product
+  attributes, never dropped), `line_revenue = quantity * unit_price`. PII
+  `none`.
+
