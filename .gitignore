@@ -15,6 +15,10 @@ dbt/target/
 dbt/dbt_packages/
 dbt/logs/
 
+# airflow image build artifact: compose plugin staged from the host by
+# `make airflow-image` (ADR-010 D1) — a ~65 MB binary, never commit it
+airflow/docker-compose
+
 # runtime data (generated, never committed)
 file-drop/data/
 logs/

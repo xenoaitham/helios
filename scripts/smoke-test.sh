@@ -10,6 +10,9 @@
 #                 that is the expected behaviour by definition-of-done (STATE.md).
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# Bind-source parity (ADR-010 D1) — the compose exec below parses
+# docker-compose.yml, whose scheduler mount needs this var.
+export HELIOS_PROJECT_DIR="${HELIOS_PROJECT_DIR:-$(pwd)}"
 
 set -a; [ -f .env ] && . ./.env; set +a
 OLTP_USER="${OLTP_POSTGRES_USER:-oltp}";   OLTP_DB="${OLTP_POSTGRES_DB:-oltp}"
@@ -102,8 +105,75 @@ echo "Stage 1 PASSED — all infrastructure containers healthy and answering que
 
 echo
 echo "===== Stage 2: end-to-end ETL assertions ====="
-echo "[FAIL] NOT IMPLEMENTED — E2E assertions (seed -> ingest -> dbt -> mart row-count + SCD2"
-echo "       checks via SQL) arrive with Phase 3's 'make run-etl'."
-echo "       This loud failure is the EXPECTED Phase 0 behaviour by definition-of-done;"
-echo "       see STATE.md and BACKLOG.md."
-exit 1
+# ADR-010 D6: a REAL orchestrated run (the same daily_close path production
+# uses), then the published-layer contract asserted against the live warehouse
+# via psql single-line static SQL. Between the dbt build and these assertions
+# the only writer is the live CDC sink — staging/marts are frozen tables, so
+# the parity counts are stable in this window.
+STAGE2_FAIL=0
+
+if bash scripts/run-etl.sh; then
+  echo "[ok]   daily_close DAG run succeeded (ingest_file → ingest_soap ∥ ingest_rest → dbt build)"
+else
+  echo "[FAIL] daily_close DAG run did not succeed (see [run-etl] output above)"; STAGE2_FAIL=1
+fi
+
+import_errs="$(docker compose exec -T airflow-scheduler bash -c 'airflow dags list-import-errors --output json | python3 -c "import json,sys; print(len(json.load(sys.stdin)))"' 2>/dev/null || echo parse_error)"
+if [ "$import_errs" = "0" ]; then
+  echo "[ok]   airflow DAG import errors: 0"
+else
+  echo "[FAIL] airflow DAG import errors: $import_errs"; STAGE2_FAIL=1
+fi
+
+wh() { docker exec helios-warehouse-db psql -U "$WH_USER" -d "$WH_DB" -tAc "$1"; }
+
+# parity_check NAME SQL — SQL returns "left|right"; ok iff equal; prints both.
+parity_check() {
+  local name="$1" sql="$2" row left right
+  row="$(wh "$sql")" || { echo "[FAIL] $name: query error"; STAGE2_FAIL=1; return; }
+  left="${row%%|*}"; right="${row#*|}"
+  if [ "$left" = "$right" ]; then
+    echo "[ok]   $name: $left = $right"
+  else
+    echo "[FAIL] $name: $left <> $right"; STAGE2_FAIL=1
+  fi
+}
+
+# zero_check NAME SQL — SQL returns one count; ok iff 0; prints the count.
+zero_check() {
+  local name="$1" sql="$2" n
+  n="$(wh "$sql")" || { echo "[FAIL] $name: query error"; STAGE2_FAIL=1; return; }
+  if [ "$n" = "0" ]; then
+    echo "[ok]   $name (violations: 0)"
+  else
+    echo "[FAIL] $name: $n violations"; STAGE2_FAIL=1
+  fi
+}
+
+# --- mart row-count parity vs staging (mirrors the dbt marts_row_parity contract) ---
+parity_check "fct_orders rows = stg_orders + stg_soap_orders" \
+  "SELECT (SELECT count(*) FROM marts.fct_orders), (SELECT count(*) FROM staging.stg_orders) + (SELECT count(*) FROM staging.stg_soap_orders)"
+parity_check "fct_order_items rows = stg_order_items" \
+  "SELECT (SELECT count(*) FROM marts.fct_order_items), (SELECT count(*) FROM staging.stg_order_items)"
+parity_check "dim_product rows = distinct(rest ∪ file) SKUs" \
+  "SELECT (SELECT count(*) FROM marts.dim_product), (SELECT count(*) FROM (SELECT sku FROM staging.stg_rest_products UNION SELECT sku FROM staging.stg_file_products) catalog)"
+parity_check "dim_customer current rows = stg_users" \
+  "SELECT (SELECT count(*) FROM marts.dim_customer WHERE is_current), (SELECT count(*) FROM staging.stg_users)"
+
+# --- SCD2 contract (mirrors scd2_current_uniqueness / scd2_window_integrity / fct_customer_scope) ---
+zero_check "dim_customer: exactly one current row per customer" \
+  "SELECT count(*) FROM (SELECT customer_id FROM marts.dim_customer WHERE is_current GROUP BY customer_id HAVING count(*) <> 1) v"
+zero_check "dim_customer: SCD2 windows contiguous (no gaps/overlaps/multi-open)" \
+  "SELECT count(*) FROM (SELECT valid_from, valid_to, lead(valid_from) over (partition by customer_id order by valid_from) AS next_from FROM marts.dim_customer) w WHERE (valid_to IS NOT NULL AND valid_to <= valid_from) OR (valid_to IS NOT NULL AND next_from IS NOT NULL AND valid_to <> next_from) OR (valid_to IS NULL AND next_from IS NOT NULL)"
+zero_check "fct_orders: SOAP rows keep the unknown member (customer_sk IS NULL)" \
+  "SELECT count(*) FROM marts.fct_orders WHERE source_type='soap' AND customer_sk IS NOT NULL"
+zero_check "fct_orders: OLTP rows all resolve a customer version" \
+  "SELECT count(*) FROM marts.fct_orders WHERE source_type='oltp' AND customer_sk IS NULL"
+
+echo
+if [ "$STAGE2_FAIL" -ne 0 ]; then
+  echo "Stage 2 FAILED — orchestration and/or published-layer contract broken (see [FAIL] lines above)."
+  exit 1
+fi
+echo "Stage 2 PASSED — orchestrated ETL green; mart parity + SCD2 contract verified on the live warehouse."
+exit 0

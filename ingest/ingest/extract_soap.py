@@ -15,6 +15,15 @@ a list). `orders_of()` handles both. Timestamps are naive UTC
 Security posture: the base URL is validated against this module's allowlist
 BEFORE the zeep client (which fetches the WSDL and posts SOAP calls) is built;
 basic-auth credentials come from the environment only.
+
+Endpoint pinning (Session 8 incident, 2026-09-12): the spyne-served WSDL's
+soap:address alternates between http://localhost:8000/ and
+http://soap-service:8000/ across requests (measured; independent of the
+request's Host header), and zeep by default POSTs to the WSDL-declared
+address — so an ingest container that drew the `localhost` variant died with
+Connection refused. `build_client` therefore pins the service endpoint to the
+validated base URL via zeep's public `create_service(binding, address)`; the
+WSDL is only used for the contract (types/operations), never for routing.
 """
 
 from __future__ import annotations
@@ -34,18 +43,29 @@ from ingest.watermarks import MAX_CREATED_AT
 # Only this compose service (plus loopback), validated before client build.
 ALLOWED_HOSTS = frozenset({"soap-service", "localhost", "127.0.0.1"})
 
+# Service binding from the frozen contract (soap-service/contract/…wsdl,
+# ADR-001): <wsdl:binding name="OrderManagement"> in tns. The contract drift
+# test guards a rename; used to pin the endpoint (module docstring).
+BINDING_QNAME = "{urn:helios:soap:ordermanagement:v1}OrderManagement"
+
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 EPOCH = "1970-01-01 00:00:00"
 SOURCE = "soap_orders"
 
 
 def build_client(base_url: str | None = None, auth: tuple[str, str] | None = None):
-    """Validated-base-URL zeep client with env-only HTTP basic auth."""
+    """Validated-base-URL zeep service proxy with the endpoint PINNED to base.
+
+    The WSDL is fetched from `{base}/?wsdl` for the contract only; the returned
+    proxy POSTs to `base` itself — never to the WSDL-declared soap:address,
+    which spyne serves nondeterministically as localhost or soap-service.
+    """
     base = config.validate_source_base_url(base_url or config.soap_base_url(), ALLOWED_HOSTS)
     user, password = auth if auth is not None else config.soap_auth()
     session = requests.Session()
     session.auth = HTTPBasicAuth(user, password)
-    return Client(f"{base}/?wsdl", transport=Transport(session=session))
+    client = Client(f"{base}/?wsdl", transport=Transport(session=session))
+    return client.create_service(BINDING_QNAME, base)
 
 
 def window_start(watermark_value: str, overlap_days: int) -> dt.datetime:
@@ -88,7 +108,9 @@ def run_soap(conn, load_id, stats: loads.RunStats, *, client=None, page_size: in
     """Pull the watermark window and land it page by page; then advance cursor.
 
     `full=True` re-pulls history from the epoch (backfill / refresh of old
-    status changes — unchanged rows no-op through the hash guard).
+    status changes — unchanged rows no-op through the hash guard). `client`
+    is the pinned service proxy from `build_client()` (tests inject a stub
+    exposing GetOrders directly).
     """
     client = client if client is not None else build_client()
     page_size = page_size if page_size is not None else config.soap_page_size()
@@ -106,7 +128,7 @@ def run_soap(conn, load_id, stats: loads.RunStats, *, client=None, page_size: in
     while page_number <= latest_total_pages:
         if page_number > max_pages:
             raise RuntimeError(f"GetOrders exceeded max_pages={max_pages} (total_pages={latest_total_pages})")
-        page = client.service.GetOrders(page=page_number, page_size=page_size, date_from=date_from)
+        page = client.GetOrders(page=page_number, page_size=page_size, date_from=date_from)
         latest_total_pages = max(1, int(page.total_pages))
         stats.units_total = latest_total_pages
         rows = [order_to_row(o) for o in orders_of(page)]

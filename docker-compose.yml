@@ -5,7 +5,10 @@
 #   airflow-db     Postgres 16  — Airflow metadata (infra only)
 #   kafka          KRaft single broker — CDC transport (Debezium arrives in Phase 2)
 #   airflow-init   one-shot: db migrate + admin user
-#   airflow-webserver / airflow-scheduler — orchestration (DAGs arrive in Phase 3)
+#   airflow-webserver / airflow-scheduler — orchestration. DAGs (Phase 3 item 9,
+#                  ADR-010): per-source ingest DAGs + master daily_close; tasks
+#                  invoke the SAME one-shot tool containers make runs through the
+#                  host's rootless docker socket (scheduler only; uid-matched).
 #   soap-service   legacy OrderManagement SOAP 1.1 source (Phase 1; ADR-001)
 #                  SQLite store on named volume soap_data; WSDL at /?wsdl (basic auth)
 #   oltp-seed      one-shot: schema + 5M+ row COPY seed of the OLTP source (ADR-002)
@@ -24,14 +27,30 @@
 name: helios
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.10.5-python3.11
-  user: "${AIRFLOW_UID:-50000}:0"
+  # ADR-010 D1: extended image = apache/airflow:2.10.5-python3.11 + the host's
+  # docker compose plugin (staged by `make airflow-image`), so DAG tasks run the
+  # SAME one-shot tool containers make runs. Not a new service — an extension.
+  build: ./airflow
+  image: helios/airflow:2.10.5
+  # Rootless-docker socket access (ADR-010 D1): inside the daemon's user
+  # namespace, container uid 0 IS the host user that runs the rootless daemon
+  # (potato) — the socket's owner. Any nonzero container uid maps into the
+  # subuid range (potato:100000:65536) and matches neither owner nor group.
+  # So the airflow services run as userns-root == that same host user: no
+  # privilege beyond what the daemon user already holds.
+  user: "0:0"
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-airflow_local_dev}@airflow-db:5432/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-helios-local-dev-secret}
+    # Absolute host path of the repo (exported by the Makefile / scripts). DAG
+    # tasks `cd` here and run docker compose from it; the scheduler mounts the
+    # repo read-only at THIS EXACT path so in-scheduler compose resolves
+    # relative bind-mount sources to the same host paths compose-on-host does
+    # (bind-source parity, ADR-010 D1).
+    HELIOS_PROJECT_DIR: ${HELIOS_PROJECT_DIR:?exported by the Makefile; export it before running docker compose by hand}
   volumes:
     - ./dags:/opt/airflow/dags
     - airflow_logs:/opt/airflow/logs
@@ -399,6 +418,21 @@ services:
     <<: *airflow-common
     container_name: helios-airflow-scheduler
     command: scheduler
+    # ADR-010 D1: tasks invoke the one-shot tool containers through the host's
+    # rootless docker socket. AIRFLOW_UID is the HOST uid used only for the
+    # socket's host-side path (the containers run as the daemon's userns root,
+    # which maps to that same user — see the anchor note). The repo is mounted
+    # read-only at its EXACT host path (HELIOS_PROJECT_DIR): the compose file,
+    # its .env interpolation and the tool build contexts all resolve there and
+    # relative bind sources stay identical to compose-on-host.
+    environment:
+      <<: *airflow-common-env
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - /run/user/${AIRFLOW_UID:-50000}/docker.sock:/var/run/docker.sock
+      - ./:${HELIOS_PROJECT_DIR:?exported by the Makefile; export it before running docker compose by hand}:ro
     healthcheck:
       # exits 0 while this scheduler's heartbeat is fresh
       test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$$(hostname)\""]

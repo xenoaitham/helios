@@ -103,6 +103,48 @@ first, never run a stale image; (2) when staging/raw counts "disagree", check
 `make cdc-status` lag first — the sink draining a backlog (or simply applying
 events mid-build) moves raw underneath you; a mutator pause is NOT a raw freeze.
 
+Phase 3 additions (Airflow orchestration, ADR-010):
+
+| Command | Effect |
+|---|---|
+| `make airflow-image` | Build `helios/airflow:2.10.5` (base + the host's compose plugin, staged at build time) and idempotently re-own the logs volume |
+| `make run-etl` | Unpause → trigger master `daily_close` → poll to terminal state; nonzero exit on failure/timeout (a run counts as success only with all task instances green) |
+| `make backfill` | Honest replay-based backfill: semantics banner + full `daily_close` replay + run-ledger tail (ADR-010 D5) |
+| `make airflow-logs` | Follow scheduler + webserver logs |
+| `make smoke-test` | Stage 1 (19 infra checks) + Stage 2: a real orchestrated run + mart parity + SCD2 assertions (exit 0) |
+
+Orchestrator notes a stranger needs:
+
+- **Topology**: `daily_close` (05:00 UTC, catchup=False, max_active_runs=1) =
+  `trigger_ingest_file → (trigger_ingest_soap ∥ trigger_ingest_rest) →
+  dbt_build`. The per-source DAGs (`ingest_soap/file/rest`, schedule=None) own
+  their retries; the master composes them via TriggerDagRunOperator. `dbt_build`
+  is the DAG-level DQ gate (one `dbt build`; staging tests gate marts inside it;
+  never `--full-refresh`).
+- **Backfill semantics (honest)**: the extract CLIs have no historical window
+  parameters; the 3 years of history were backfilled at first landing and
+  watermarks + the hash ledger keep them correct. `make backfill` therefore
+  replays the whole pipeline (provably zero-work: `rows_landed=0`), and the one
+  real window replay is the manual
+  `docker compose run --rm ingest python -m ingest.run --source soap --full`
+  (epoch→now, ~2.5 min, hash-guarded no-op for unchanged rows).
+- **Idempotency triage stays the same**: count drift between runs is live-CDC
+  churn — `make cdc-status` FIRST. Under a deliberately quiesced upstream, two
+  consecutive `make run-etl` runs are bit-identical (proven in
+  EVIDENCE/phase-3-airflow.md).
+- **Do not** run `make dbt-build` by hand while a `daily_close` run is active:
+  `max_active_runs=1` serializes DAG-initiated builds only; a manual build can
+  still race the DAG's (two full-refresh-rebuilt marts layers = wasted work, and
+  the snapshot is not concurrency-safe). Check the UI :8080 first.
+- **DAG edits**: DAGs are bind-mounted (`./dags`) — the scheduler re-parses
+  within ~30 s; no rebuild needed for DAG-file changes. Ingest/dbt code changes
+  go through the images (`docker compose build ingest` / `make dbt-build`); the
+  DAG's dbt task rebuilds its image on every run by design.
+- **Hand-running compose** (not via `make`): export
+  `HELIOS_PROJECT_DIR="$(pwd)"` first — the compose file requires it (the
+  scheduler's repo mount + DAG tasks `cd` there; bind-source parity, ADR-010
+  D1). Missing var = loud interpolation error by design.
+
 ## 2. Endpoints & credentials
 
 All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:
@@ -191,6 +233,8 @@ relation whose state persists across builds.
 - NEVER run the marts build with `--full-refresh`: a snapshot full-refresh
   drops and re-creates it from current state = instant history wipe.
   `make dbt-build` is deliberately a plain `dbt build` — keep it that way.
+  The DAG's `dbt_build` task is the same plain build (verified by grep in
+  EVIDENCE/phase-3-airflow.md).
 - NEVER `drop schema snapshots` / truncate the table outside `make clean`
   (which wipes everything and reseeds).
 - History starts at the snapshot's first run; a normal `dbt build` only ever
@@ -200,6 +244,34 @@ relation whose state persists across builds.
 - Rotating `PII_HASH_SALT` invalidates every staging hash at once → the next
   build would record ~50 k "changes". Treat salt rotation as a destructive,
   planned event: rotate AND consciously rebuild the snapshot from scratch.
+
+### Airflow operations (Phase 3 item 9, ADR-010)
+
+| Task | Command | Notes |
+|---|---|---|
+| Trigger the pipeline and watch it | `make run-etl` | nonzero exit on DAG failure/timeout; run_id `etl-<ts>` |
+| Replay-based backfill | `make backfill` | run_id `backfill-<ts>`; zero-work proof in the ledger tail |
+| Scheduler/webserver logs | `make airflow-logs` | task logs live in the UI (or `airflow_logs` volume) |
+| DAG health | `airflow dags list-import-errors` (in-scheduler) | also asserted in smoke Stage 2 |
+
+- **Trigger-before-start_date trap** (hit for real, 2026-09-11): Airflow marks
+  a run "success" with ZERO task instances when the execution date precedes the
+  DAG start_date (verify_integrity filters tasks by start_date and the scheduler
+  skips verify_integrity when the run's dag_hash matches the serialization).
+  `START_DATE` is pinned in the past and `run-etl.sh` refuses zero-task
+  "successes" — do not raise START_DATE to "now".
+- **Rootless socket**: DAG tasks run `docker compose` inside the scheduler
+  against the host's rootless daemon (`/run/user/<AIRFLOW_UID>/docker.sock`).
+  The airflow containers run as the daemon's userns root (= your user); any
+  nonzero container uid maps into the subuid range and gets `permission denied`
+  (measured). `AIRFLOW_UID` in `.env` is your host uid and feeds the socket
+  path only. After changing it: `make airflow-image` (re-owns the logs volume).
+- **SOAP WSDL address quirk** (hit for real, 2026-09-12): the served WSDL's
+  `soap:address` alternates `localhost`/`soap-service` across requests; the
+  ingest extractor pins its zeep endpoint to the validated base URL (contract
+  from the WSDL, routing never). Hand-rolled clients should do the same.
+- SLA misses surface in the UI only (no SMTP in this stack; alerting is
+  Phase 4 item 12).
 
 ## 5. Environment notes (this repo's dev machine)
 
@@ -219,3 +291,11 @@ On any normal machine with the system daemon running, none of this is needed —
 
 Rootless caveats: published ports bind on host loopback (localhost URLs only), no cgroup
 resource limits, images live in `~/.local/share/docker` (watch disk — this host is tight).
+
+Rootless + Airflow (item 9, ADR-010): the scheduler invokes the one-shot tool
+containers through the rootless socket. The socket's group is an unnamed
+rootlesskit allocation (not restart-stable) and any nonzero container uid maps
+into the subuid range — so the airflow services run as `user: "0:0"`, which in
+the daemon's user namespace IS your host user (no privilege beyond what the
+daemon user already holds). `AIRFLOW_UID` (host uid) feeds the socket's
+host-side path; `make airflow-image` re-owns the logs volume after a uid change.

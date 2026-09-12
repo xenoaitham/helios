@@ -68,8 +68,12 @@ def test_window_start_subtracts_overlap():
     assert start == dt.datetime(2026, 9, 4) - dt.timedelta(days=7)
 
 
-class FakeService:
-    """GetOrders over an in-memory list, page_size pagination, created_at filter."""
+class FakeClient:
+    """GetOrders over an in-memory list, page_size pagination, created_at filter.
+
+    Mimics the pinned zeep ServiceProxy from build_client(): GetOrders lives on
+    the client object itself (endpoint pinning — see extract_soap module doc).
+    """
 
     def __init__(self, orders):
         self.orders = orders
@@ -84,11 +88,6 @@ class FakeService:
         chunk = window[(page - 1) * page_size : page * page_size]
         wrapped = SimpleNamespace(Order=[_order(o["order_id"], o["created_at"], o["updated_at"], o["status"]) for o in chunk])
         return SimpleNamespace(page=page, page_size=page_size, total_results=len(window), total_pages=total_pages, orders=wrapped)
-
-
-class FakeClient:
-    def __init__(self, orders):
-        self.service = FakeService(orders)
 
 
 def _orders(n):
@@ -107,7 +106,7 @@ def test_full_run_lands_all_pages_and_advances_watermark(tconn):
     assert tconn.execute("SELECT count(*) FROM raw.soap_orders").fetchone()[0] == 10
     wm = tconn.execute("SELECT watermark_value, watermark_kind FROM raw.ingest_watermarks WHERE source = 'soap_orders'").fetchone()
     assert wm == ("2026-09-01 10:00:00", "max_created_at")  # max created_at of order 10
-    assert client.service.seen_date_from[0] == EPOCH  # no prior cursor -> full history window
+    assert client.seen_date_from[0] == EPOCH  # no prior cursor -> full history window
 
 
 def test_incremental_run_pulls_only_the_overlap_window(tconn):
@@ -116,7 +115,7 @@ def test_incremental_run_pulls_only_the_overlap_window(tconn):
     stats = loads.RunStats()
     run_soap(tconn, uuid.uuid4(), stats, client=incremental, page_size=500, overlap_days=7)
     # window = 2026-09-01 10:00:00 - 7d = 2026-08-25 10:00:00 -> all 12 orders are >= that
-    assert incremental.service.seen_date_from[0] == "2026-08-25 10:00:00"
+    assert incremental.seen_date_from[0] == "2026-08-25 10:00:00"
     assert stats.rows_landed == 2  # the two new orders
     assert stats.rows_unchanged == 10  # the overlap re-pull no-ops through the hash guard
 

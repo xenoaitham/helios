@@ -3,8 +3,14 @@ SHELL := /bin/bash
 COMPOSE := docker compose
 ENV_FILE := .env
 
+# Absolute repo path, exported for docker compose (ADR-010 D1): the scheduler
+# mounts the repo read-only at exactly this path so compose commands run inside
+# the scheduler resolve relative bind-mount sources to the same host paths
+# compose-on-host computes (bind-source parity). Also what DAG tasks `cd` into.
+export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -123,6 +129,19 @@ dbt-test: dbt-image ## dbt test: the staging test contract, standalone
 
 dbt-freshness: dbt-image ## dbt source freshness (per-cadence thresholds, ADR-008 D4)
 	docker compose run --rm dbt source freshness
+
+# --- Phase 3 item 9: Airflow orchestration (ADR-010) -------------------------
+airflow-image: ## Build the extended airflow image (base + host compose plugin) and re-own the logs volume
+	bash scripts/airflow-image.sh
+
+run-etl: ## Trigger the master daily_close DAG and tail it to completion (nonzero on failure; ADR-010 D4)
+	bash scripts/run-etl.sh
+
+backfill: ## Honest replay-based backfill: full daily_close replay + ledger proof (ADR-010 D5)
+	bash scripts/backfill.sh
+
+airflow-logs: ## Follow airflow scheduler + webserver logs
+	$(COMPOSE) logs -f --tail 100 airflow-scheduler airflow-webserver
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v
