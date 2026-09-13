@@ -10,7 +10,7 @@ ENV_FILE := .env
 export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness airflow-image run-etl backfill airflow-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -142,6 +142,24 @@ backfill: ## Honest replay-based backfill: full daily_close replay + ledger proo
 
 airflow-logs: ## Follow airflow scheduler + webserver logs
 	$(COMPOSE) logs -f --tail 100 airflow-scheduler airflow-webserver
+
+# --- Phase 4 item 10: Great Expectations gate (ADR-011). One-shot tool image,
+# code baked in: every target rebuilds the image first (cached no-op when
+# unchanged) like the dbt targets.
+dq-image: ## Build the dq tool image (pinned great-expectations 1.22.0)
+	docker compose build dq
+
+dq-run: dq-image ## Run the GE gate over frozen staging/marts; dead-letters failures; nonzero exit on any failure
+	docker compose run --rm dq python -m dq gate
+
+dq-replay: dq-image ## Resolve open dead-letter incidents that no longer reproduce (nonzero if any remain open)
+	docker compose run --rm dq python -m dq replay
+
+dq-status: dq-image ## Report dq.dq_quarantine status (open/resolved incidents)
+	docker compose run --rm dq python -m dq status
+
+test-dq: ## Run dq unit tests in a throwaway container
+	docker compose run --rm dq python -m pytest
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

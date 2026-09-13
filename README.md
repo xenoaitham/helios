@@ -16,8 +16,8 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
 | 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done — [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
-| 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ⬜ |
-| 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus/Grafana | ⬜ |
+| 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ✅ done — [EVIDENCE/phase-3.md](EVIDENCE/phase-3.md) roll-up |
+| 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage, Prometheus/Grafana | 🔶 item 10 done |
 | 5 | Chaos & performance: `make chaos-test`, `make bench` | ⬜ |
 | 6 | Package: RUNBOOK, data dictionary, interview defense pack | ⬜ |
 
@@ -80,7 +80,8 @@ flowchart LR
 
     ORCH["Airflow<br/>DAGs - SLA - retries (Ph.3)"]
     DBT["dbt<br/>staging to marts - SCD2 (Ph.3)"]
-    GE["Great Expectations<br/>quality gates - quarantine (Ph.4)"]
+    GE["Great Expectations gate<br/>semantic suites over frozen<br/>staging+marts (Ph.4, ADR-011)"]
+    DQ[("dq.dq_quarantine<br/>dead-letter + replay")]
     LIN["OpenLineage to Marquez (Ph.4)"]
     PROM["Prometheus + Grafana (Ph.4)"]
 
@@ -92,15 +93,15 @@ flowchart LR
     ORCH --> ING
     ORCH --> DEB
     RAW --> DBT --> STG --> MART
-    GE --> STG
+    DBT --> GE
+    GE --> DQ
     ORCH --> GE
     ORCH -.-> LIN
     PROM -.-> ORCH
 ```
 
-Only the platform row (Postgres ×2 + Airflow + Kafka + Airflow metadata DB) and
-**soap-service** exist today; everything else lands in the phase shown. The diagram is
-the contract — each phase's CRITIC review checks the repo against it.
+The shipped reality always outruns this static file — [STATE.md](STATE.md) is the
+current state and each phase's CRITIC review checks the repo against the diagram.
 
 ### Source 1: soap-service (Phase 1)
 

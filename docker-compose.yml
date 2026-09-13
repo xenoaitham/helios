@@ -21,6 +21,9 @@
 #                  cursors + content-hash idempotency + quarantine (ADR-006/007)
 #   dbt            one-shot dbt build/test/freshness: raw -> typed staging with
 #                  PII hashing + a shared per-run CDC cut (ADR-008)
+#   dq             one-shot Great Expectations gate over frozen staging/marts,
+#                  dead-letter quarantine in dq.dq_quarantine + replay
+#                  (Phase 4; ADR-011)
 #
 # All credentials come from .env (see .env.example).
 
@@ -379,6 +382,29 @@ services:
       WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
       WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
       PII_HASH_SALT: ${PII_HASH_SALT:-helios_local_dev_pii_salt}
+    depends_on:
+      warehouse-db:
+        condition: service_healthy
+
+  # Phase 4 trust (ADR-011): Great Expectations gate over the FROZEN staging/
+  # marts relations + dead-letter quarantine + replay. One-shot TOOL like dbt
+  # (profiles gate it out of `make up`); Airflow runs it as the `dq_gate` task
+  # downstream of dbt_build at the seam ADR-010 D3 reserved. Ephemeral GX data
+  # context: credentials via env only, zero filesystem writes (ADR-011 D9);
+  # telemetry disabled — the tool speaks no HTTP at all.
+  dq:
+    build: ./dq
+    image: helios/dq:latest
+    container_name: helios-dq
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      DQ_QUARANTINE_MAX_ROWS: ${DQ_QUARANTINE_MAX_ROWS:-10000}
+      GX_ANALYTICS_ENABLED: "false"
+    command: ["python", "-m", "dq", "gate"]
     depends_on:
       warehouse-db:
         condition: service_healthy

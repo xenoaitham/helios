@@ -250,3 +250,24 @@ wipe.
   attributes, never dropped), `line_revenue = quantity * unit_price`. PII
   `none`.
 
+## Warehouse dq schema (Phase 4 item 10, ADR-011) — the semantic gate's dead-letter
+
+Created and owned by the `dq` tool (Great Expectations 1.22.0, one-shot
+container) at every gate start; the `dq_gate` task runs it downstream of
+`dbt_build` in `daily_close`.
+
+- `dq.dq_quarantine` — one row per open DQ incident; identity
+  `(data_asset, check_digest, source_pk_hash)` among OPEN rows (partial unique
+  index `WHERE resolved_at IS NULL`), so re-detection refreshes
+  `run_id`/`landed_at` instead of duplicating, and a re-poisoned row after
+  resolution opens a NEW incident. Columns: `suite`, `data_asset`,
+  `expectation` (GX type), `check_digest` (rule identity = type + semantic
+  kwargs), `column_name`, `row_condition`, `source_pk` (JSONB), `payload`
+  (JSONB — the offending row), `failure_reason` (rule + observed values +
+  shortfall beyond `DQ_QUARANTINE_MAX_ROWS`), `run_id`, `status`
+  (`open`/`resolved`), `landed_at`, `resolved_at`, `resolved_run_id`.
+  Resolution is set by `make dq-replay` after a source fix + rebuild;
+  resolved history is never deleted (audit trail). PII: payloads are
+  staging/marts rows — `*_hash` only, no cleartext (the gate never reads
+  `raw`).
+

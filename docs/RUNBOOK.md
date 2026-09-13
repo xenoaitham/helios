@@ -273,6 +273,42 @@ relation whose state persists across builds.
 - SLA misses surface in the UI only (no SMTP in this stack; alerting is
   Phase 4 item 12).
 
+### DQ gate operations (Phase 4 item 10, ADR-011)
+
+The semantic gate (`dq_gate` task, after `dbt_build` in `daily_close`) runs
+Great Expectations suites over the FROZEN staging/marts relations every build
+produces, and dead-letters offending rows to `dq.dq_quarantine` with full
+provenance (suite, expectation, source pk, payload, run_id). One failing
+expectation → nonzero exit → the close is blocked AT THE GATE. It never reads
+`raw`/live CDC, so it cannot flake on mutator drift (ADR-011 D4).
+
+| Task | Command | Notes |
+|---|---|---|
+| Run the gate manually | `make dq-run` | same container the DAG task runs; nonzero on failure |
+| Dead-letter status | `make dq-status` | open/resolved counts + recent incidents |
+| Resolve after a source fix | `make dq-replay` | resolves open incidents that no longer reproduce; nonzero if any remain |
+| dq unit tests | `make test-dq` | 32 tests, throwaway container |
+
+**When the gate goes red** (event `dq.gate_failed` in `make airflow-logs` or
+`make dq-run` output):
+
+1. `make dq-status` — see which suite/rows are dead-lettered; each row's
+   `failure_reason` states the rule and the observed values.
+2. Fix the SOURCE (never hand-edit the warehouse): file feed → drop a
+   corrected CSV with the SAME filename (the hash ledger re-lands it); batch
+   REST → source-side fix, next walk refreshes; CDC/OLTP → corrected row
+   upserts through the normal CDC path; SOAP → the documented `--full` replay.
+3. Rebuild (`make run-etl`, or `make dbt-build` + `make dq-run`) — the gate
+   must go green on the fixed data.
+4. `make dq-replay` — re-runs the gate and resolves every open incident whose
+   row no longer violates. "Quarantine empty" = zero open incidents; resolved
+   history is kept forever as the audit trail.
+
+The alert IS the gate: DAG task failure (UI + `make run-etl` nonzero), the
+structured `dq.gate_failed` JSON event, and the `dq.dq_quarantine` table
+itself. No SMTP/Slack exists and none is faked; real push-alerting arrives
+with item 12 (Prometheus rules).
+
 ## 5. Environment notes (this repo's dev machine)
 
 The baseline was built on a host where the system Docker daemon is disabled and sudo is

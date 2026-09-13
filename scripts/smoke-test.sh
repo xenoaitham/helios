@@ -170,6 +170,12 @@ zero_check "fct_orders: SOAP rows keep the unknown member (customer_sk IS NULL)"
 zero_check "fct_orders: OLTP rows all resolve a customer version" \
   "SELECT count(*) FROM marts.fct_orders WHERE source_type='oltp' AND customer_sk IS NULL"
 
+# --- Phase 4 (ADR-011): the semantic gate's dead-letter must carry no open
+# debt after a green orchestrated run — the full poison→replay loop ends with
+# this count at zero (a nonzero value here is honest: unresolved DQ debt). ---
+zero_check "dq gate: no open quarantined incidents (dead-letter clean)" \
+  "SELECT count(*) FROM dq.dq_quarantine WHERE resolved_at IS NULL"
+
 echo
 if [ "$STAGE2_FAIL" -ne 0 ]; then
   echo "Stage 2 FAILED — orchestration and/or published-layer contract broken (see [FAIL] lines above)."
