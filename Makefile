@@ -10,7 +10,7 @@ ENV_FILE := .env
 export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq airflow-image run-etl backfill airflow-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -160,6 +160,14 @@ dq-status: dq-image ## Report dq.dq_quarantine status (open/resolved incidents)
 
 test-dq: ## Run dq unit tests in a throwaway container
 	docker compose run --rm dq python -m pytest
+
+# --- Phase 4 item 11: OpenLineage + Marquez (ADR-012). The emitters are
+# wired in compose (airflow env + the dbt-ol entrypoint); this is the
+# verification target: it asserts MEASURED events via the Marquez REST API
+# (jobs incl. daily_close's tasks, the raw->staging->marts dataset graph,
+# column-level lineage into a mart) and dumps the API JSON to EVIDENCE/.
+lineage-verify: ## Prove measured lineage via the Marquez API; dump evidence JSON (nonzero on any missing event)
+	bash scripts/lineage-verify.sh
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

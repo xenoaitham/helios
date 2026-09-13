@@ -309,6 +309,32 @@ structured `dq.gate_failed` JSON event, and the `dq.dq_quarantine` table
 itself. No SMTP/Slack exists and none is faked; real push-alerting arrives
 with item 12 (Prometheus rules).
 
+### 4c. Lineage operations (Phase 4 item 11, ADR-012)
+
+Marquez is the OpenLineage backend: `marquez-db` (dedicated Postgres, volume
+`marquez_db_data`), `marquez-api` (lineage REST :5000, admin :5001 with
+`/healthcheck`), `marquez-web` (UI :3000). The emitters are the Airflow
+provider (in the 2.10.5 base image, env-wired in compose) and the `dbt-ol`
+wrapper (the dbt image's ENTRYPOINT — the same `docker compose run --rm dbt
+build` command `make dbt-build` and the DAG task have always used).
+
+| Task | Command | Notes |
+|---|---|---|
+| Verify measured lineage | `make lineage-verify` | API-asserts the dataset graph, daily_close jobs (incl. dq_gate) and column-level lineage into `fct_orders`; dumps JSON/CSV to `EVIDENCE/phase-4-lineage/` |
+| Look at the graph | http://localhost:3000 | pick a dataset → lineage graph; the **column-level** page renders per-column edges (e.g. `dim_customer.customer_sk ─→ fct_orders.customer_sk`) |
+| Wipe the lineage store | `make down -v` deletes it (or full `make clean`) | lineage is DERIVED state: one `make dbt-build` + `make run-etl` re-derives the graph; no source data touched |
+| Backend outage | `docker compose stop marquez-api` | the pipeline is non-fatal by contract (ADR-012 D6): dbt build and daily_close stay green (emission retries add ~9 s/event ≈ up to ~12 min to dbt_build under a total outage — inside the task's 20-min timeout); events resume on `docker compose start marquez-api` + the next build/run. Emissions attempted during an outage are dropped by the client (no queueing/backfill). |
+
+What the graph shows (the emit boundary, ADR-012 D2): dbt's **raw sources →
+staging → marts** with column-level lineage where the SQL parser resolves it;
+the ingest→raw hop is job-level only (the true sources are outside SQL), and
+`dq_gate` appears as an Airflow job without dataset edges. Measured naming:
+Airflow jobs live in namespace `helios` (`daily_close.<task_id>`); dbt
+datasets live in namespace `postgres://warehouse-db:5432`
+(`<db>.<schema>.<model>`). Column-level API: `GET /api/v1/column-lineage?nodeId=dataset:<ns>:<dataset>&withDownstream=true`
+(the `dataset:`-prefixed shape — a `datasetField:`-prefixed nodeId 500s on
+these namespaces).
+
 ## 5. Environment notes (this repo's dev machine)
 
 The baseline was built on a host where the system Docker daemon is disabled and sudo is

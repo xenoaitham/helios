@@ -1,0 +1,42 @@
+# HELIOS Marquez API configuration (ADR-012 D5).
+#
+# Verbatim from the image's baked marquez.dev.yml (0.51.1), with two deltas:
+#   1. db.user / db.password come from the environment instead of the baked
+#      config's hardcoded marquez/marquez (no credential literals in repo
+#      configs — compose injects MARQUEZ_POSTGRES_* from .env).
+#   2. search.enabled is false — the stack runs no OpenSearch and no job
+#      justifies it (ADR-012 D5).
+# compose points the image entrypoint at this file via MARQUEZ_CONFIG.
+server:
+  applicationConnectors:
+  - type: http
+    port: ${MARQUEZ_PORT:-5000}
+    httpCompliance: RFC7230_LEGACY
+  adminConnectors:
+  - type: http
+    port: ${MARQUEZ_ADMIN_PORT:-5001}
+
+db:
+  driverClass: org.postgresql.Driver
+  url: jdbc:postgresql://${POSTGRES_HOST:-localhost}:${POSTGRES_PORT:-5432}/marquez
+  user: ${MARQUEZ_POSTGRES_USER}
+  password: ${MARQUEZ_POSTGRES_PASSWORD}
+
+migrateOnStartup: true
+
+graphql:
+  enabled: true
+
+logging:
+  level: INFO
+  appenders:
+    - type: console
+
+search:
+  enabled: false
+
+tags:
+  - name: PII
+    description: Personally identifiable information
+  - name: SENSITIVE
+    description: Contains sensitive information

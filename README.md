@@ -17,7 +17,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done — [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ✅ done — [EVIDENCE/phase-3.md](EVIDENCE/phase-3.md) roll-up |
-| 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage, Prometheus/Grafana | 🔶 item 10 done |
+| 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage ([phase-4-lineage](EVIDENCE/phase-4-lineage.md)), Prometheus/Grafana | 🔶 items 10–11 done |
 | 5 | Chaos & performance: `make chaos-test`, `make bench` | ⬜ |
 | 6 | Package: RUNBOOK, data dictionary, interview defense pack | ⬜ |
 
@@ -47,11 +47,28 @@ First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 | Warehouse Postgres | localhost:5433, db `warehouse` (schemas `raw`, `staging`, `marts`) | `WAREHOUSE_POSTGRES_USER` / `WAREHOUSE_POSTGRES_PASSWORD` |
 | Kafka (host listener) | localhost:29092 | n/a (PLAINTEXT, local dev) |
 | SOAP OrderManagement (legacy source, Phase 1) | http://localhost:8000/?wsdl (WSDL), `/health` (unauthenticated) | `SOAP_BASIC_AUTH_USER` / `SOAP_BASIC_AUTH_PASSWORD` (HTTP basic auth; required on every SOAP path incl. WSDL) |
+| Marquez lineage UI (Phase 4, ADR-012) | http://localhost:3000 (graph + column-level views); lineage REST http://localhost:5000, admin :5001 | n/a (unauthenticated, local dev) |
 | OLTP seeder / mutator (Phase 1) | one-shot + long-running containers; mutator `/health` is internal (:8081, healthcheck only) | reuses `OLTP_POSTGRES_*` |
 
 `make smoke-test` exits non-zero on any health mismatch; Stage 2 (ETL assertions) is
 intentionally unimplemented until Phase 3 — this loud failure is the Phase 0 definition
 of done.
+
+### Lineage (Phase 4, ADR-012)
+
+`daily_close` tasks and the wrapped dbt build emit OpenLineage to Marquez. The
+graph is **dbt's raw sources → staging → marts** (the ingest→raw hop is
+job-level only — the emit boundary is stated verbatim in ADR-012 D2), with
+column-level lineage into marts (e.g. `dim_customer.customer_sk ─→
+fct_orders.customer_sk`). Verify it yourself:
+
+```bash
+make lineage-verify   # API-asserted: datasets, daily_close jobs incl. dq_gate, column lineage; dumps EVIDENCE JSON
+make run-etl          # a full close emits fresh events (dbt_build runs dbt-ol; every task emits via the provider)
+```
+
+The pipeline is non-fatal when Marquez is down (drilled: full close green with
+the api stopped; events resume on return — `EVIDENCE/phase-4-lineage/drill-marquez-down.log`).
 
 ## Architecture (target — components annotated with the phase that delivers them)
 
@@ -79,10 +96,10 @@ flowchart LR
     end
 
     ORCH["Airflow<br/>DAGs - SLA - retries (Ph.3)"]
-    DBT["dbt<br/>staging to marts - SCD2 (Ph.3)"]
+    DBT["dbt<br/>staging to marts - SCD2 (Ph.3)<br/>dbt-ol wrapper (Ph.4, ADR-012)"]
     GE["Great Expectations gate<br/>semantic suites over frozen<br/>staging+marts (Ph.4, ADR-011)"]
     DQ[("dq.dq_quarantine<br/>dead-letter + replay")]
-    LIN["OpenLineage to Marquez (Ph.4)"]
+    LIN["Marquez (Ph.4, ADR-012)<br/>api :5000 - web UI :3000<br/>own Postgres; table+column lineage<br/>raw sources → staging → marts"]
     PROM["Prometheus + Grafana (Ph.4)"]
 
     SOAP --> ING
@@ -96,7 +113,8 @@ flowchart LR
     DBT --> GE
     GE --> DQ
     ORCH --> GE
-    ORCH -.-> LIN
+    ORCH -.->|task/run events| LIN
+    DBT -.->|dbt-ol: dataset + column-lineage events| LIN
     PROM -.-> ORCH
 ```
 

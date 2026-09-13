@@ -17,5 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY project/ ./
 
-ENTRYPOINT ["dbt"]
+# ADR-012 D4: the OpenLineage wrapper IS the invocation path — dbt-ol passes
+# arguments through to dbt, then parses the run artifacts and emits
+# run/dataset/column-lineage events. ONE command wraps dbt for `make
+# dbt-build` AND the DAG's dbt_build task (build-then-run convention,
+# ADR-010 D1); no second invocation path exists.
+ENTRYPOINT ["dbt-ol"]
 CMD ["build"]

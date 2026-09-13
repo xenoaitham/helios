@@ -22,7 +22,7 @@ STAGE1_FAIL=0
 
 echo "===== Stage 1: infrastructure ====="
 
-for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service cdc-connect cdc-sink; do
+for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service cdc-connect cdc-sink marquez-db marquez-api marquez-web; do
   status="$(docker inspect -f '{{.State.Health.Status}}' "helios-${svc}" 2>/dev/null || echo missing)"
   if [ "$status" = "healthy" ]; then
     echo "[ok]   container $svc healthy"
@@ -56,6 +56,13 @@ if docker exec helios-airflow-db psql -U airflow -d airflow -tAc "SELECT 1" >/de
   echo "[ok]   airflow-db answers SQL"
 else
   echo "[FAIL] airflow-db does not answer SQL"; STAGE1_FAIL=1
+fi
+
+# --- Phase 4 (ADR-012): the lineage store answers SQL ---
+if docker exec helios-marquez-db psql -U "${MARQUEZ_POSTGRES_USER:-marquez}" -d marquez -tAc "SELECT 1" >/dev/null 2>&1; then
+  echo "[ok]   marquez-db answers SQL"
+else
+  echo "[FAIL] marquez-db does not answer SQL"; STAGE1_FAIL=1
 fi
 
 if docker exec helios-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
@@ -175,6 +182,54 @@ zero_check "fct_orders: OLTP rows all resolve a customer version" \
 # this count at zero (a nonzero value here is honest: unresolved DQ debt). ---
 zero_check "dq gate: no open quarantined incidents (dead-letter clean)" \
   "SELECT count(*) FROM dq.dq_quarantine WHERE resolved_at IS NULL"
+
+# --- Phase 4 (ADR-012): MEASURED lineage, asserted via the Marquez REST API.
+# The orchestrated run above just emitted fresh events (the DAG's dbt_build
+# runs dbt-ol; every task emits via the Airflow provider), so these assert
+# what THIS run produced. A down Marquez here is a FAIL: the platform's
+# declared state includes the lineage backend (the non-fatal contract is
+# proven separately by the Marquez-down drill, ADR-012 D6).
+# Measured namespaces (2026-09-13): Airflow JOBS land in `helios`; dbt-ol
+# namespaces DATASETS by the dbt connection URI. The column-lineage endpoint
+# takes a `dataset:`-prefixed nodeId and returns DATASET_FIELD nodes with
+# per-node inEdges/outEdges (the format the Marquez UI itself issues). ---
+MQ="http://localhost:${MARQUEZ_API_PORT:-5000}"
+MQ_DS_NS='postgres%3A%2F%2Fwarehouse-db%3A5432'
+# first arg: path; any further args: extra curl options (e.g. -G --data-urlencode ...)
+mq() { local p="$1"; shift; curl -sf --max-time 15 "$@" "$MQ$p"; }
+
+lineage_ok() { echo "[ok]   $1"; }
+lineage_fail() { echo "[FAIL] $1"; STAGE2_FAIL=1; }
+
+if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  lineage_fail "host needs curl + python3 for the Marquez assertions"
+else
+  DATASETS_JSON="$(mq "/api/v1/namespaces/$MQ_DS_NS/datasets" || true)"
+  if [ -n "$DATASETS_JSON" ] \
+     && python3 -c 'import json,sys; d=json.load(sys.stdin); names=" ".join(x["name"] for x in d["datasets"]); sys.exit(0 if ("stg_orders" in names and "fct_orders" in names and "stg_payments" in names) else 1)' <<< "$DATASETS_JSON"; then
+    lineage_ok "marquez: dbt dataset graph present (raw sources -> staging -> marts, connection-URI namespace)"
+  else
+    lineage_fail "marquez: dbt datasets missing (stg_orders/fct_orders/stg_payments) — dbt lineage events absent?"
+  fi
+
+  JOBS_JSON="$(mq /api/v1/namespaces/helios/jobs || true)"
+  if [ -n "$JOBS_JSON" ] \
+     && python3 -c 'import json,sys; d=json.load(sys.stdin); names=" ".join(j["name"] for j in d["jobs"]); sys.exit(0 if ("daily_close.dbt_build" in names and "daily_close.dq_gate" in names) else 1)' <<< "$JOBS_JSON"; then
+    lineage_ok "marquez: daily_close task jobs present (dbt_build + dq_gate)"
+  else
+    lineage_fail "marquez: daily_close task jobs missing (dbt_build/dq_gate) — Airflow events absent?"
+  fi
+
+  CL_JSON="$(mq /api/v1/column-lineage -G \
+    --data-urlencode 'nodeId=dataset:postgres://warehouse-db:5432:warehouse.marts.fct_orders' \
+    --data-urlencode 'depth=2' --data-urlencode 'withDownstream=true' 2>/dev/null || true)"
+  if [ -n "$CL_JSON" ] \
+     && python3 -c 'import json,sys; g=json.load(sys.stdin); edges=[(e.get("origin") or e.get("source",""),e.get("destination","")) for n in g.get("graph",[]) for e in (n.get("inEdges") or [])+(n.get("outEdges") or []) if "warehouse.marts.fct_orders" in (e.get("destination","")+(e.get("origin") or e.get("source","")))]; sys.exit(0 if edges else 1)' <<< "$CL_JSON"; then
+    lineage_ok "marquez: column-level lineage reaches marts.fct_orders (API-proven)"
+  else
+    lineage_fail "marquez: column-lineage graph for fct_orders empty"
+  fi
+fi
 
 echo
 if [ "$STAGE2_FAIL" -ne 0 ]; then
