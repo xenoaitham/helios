@@ -10,7 +10,7 @@ ENV_FILE := .env
 export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify airflow-image run-etl backfill airflow-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -168,6 +168,19 @@ test-dq: ## Run dq unit tests in a throwaway container
 # column-level lineage into a mart) and dumps the API JSON to EVIDENCE/.
 lineage-verify: ## Prove measured lineage via the Marquez API; dump evidence JSON (nonzero on any missing event)
 	bash scripts/lineage-verify.sh
+
+# --- Phase 4 item 12: Prometheus + Grafana (ADR-013). The metrics stack is
+# wired in compose + observability/ (dashboards, datasources, scrape config,
+# rules and the exporter mapping are CODE). metrics-verify asserts MEASURED
+# scrapes/rules/metric-names/values and the Grafana provisioning via the
+# APIs (non-destructive, dumps EVIDENCE); metrics-drill is the scripted
+# alert fire-drill (stop a scraped target -> rule fires -> restart ->
+# recovery). The non-fatal drills are documented in RUNBOOK + EVIDENCE.
+metrics-verify: ## Prove measured metrics via the Prometheus/Grafana APIs; dump evidence (nonzero on any missing surface)
+	bash scripts/metrics-verify.sh
+
+metrics-drill: ## Alert fire-drill: stop statsd-exporter, assert HeliosScrapeTargetDown fires, restart, assert recovery
+	bash scripts/metrics-drill.sh
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

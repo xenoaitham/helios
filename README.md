@@ -17,7 +17,7 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done — [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ✅ done — [EVIDENCE/phase-3.md](EVIDENCE/phase-3.md) roll-up |
-| 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage ([phase-4-lineage](EVIDENCE/phase-4-lineage.md)), Prometheus/Grafana | 🔶 items 10–11 done |
+| 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage ([phase-4-lineage](EVIDENCE/phase-4-lineage.md)), Prometheus + Grafana ([phase-4-metrics](EVIDENCE/phase-4-metrics.md)) | ✅ done |
 | 5 | Chaos & performance: `make chaos-test`, `make bench` | ⬜ |
 | 6 | Package: RUNBOOK, data dictionary, interview defense pack | ⬜ |
 
@@ -48,11 +48,13 @@ First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 | Kafka (host listener) | localhost:29092 | n/a (PLAINTEXT, local dev) |
 | SOAP OrderManagement (legacy source, Phase 1) | http://localhost:8000/?wsdl (WSDL), `/health` (unauthenticated) | `SOAP_BASIC_AUTH_USER` / `SOAP_BASIC_AUTH_PASSWORD` (HTTP basic auth; required on every SOAP path incl. WSDL) |
 | Marquez lineage UI (Phase 4, ADR-012) | http://localhost:3000 (graph + column-level views); lineage REST http://localhost:5000, admin :5001 | n/a (unauthenticated, local dev) |
+| Grafana dashboards (Phase 4, ADR-013) | http://localhost:3001 (dashboard uid `helios-pipeline`) | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` |
+| Prometheus (Phase 4, ADR-013) | http://localhost:9091 (targets, rules, `/alerts`); scrape + alert config as code in `observability/` | n/a (unauthenticated, local dev) |
 | OLTP seeder / mutator (Phase 1) | one-shot + long-running containers; mutator `/health` is internal (:8081, healthcheck only) | reuses `OLTP_POSTGRES_*` |
 
-`make smoke-test` exits non-zero on any health mismatch; Stage 2 (ETL assertions) is
-intentionally unimplemented until Phase 3 — this loud failure is the Phase 0 definition
-of done.
+`make smoke-test` runs 26 Stage-1 infra checks and a full Stage-2 E2E
+verification (an orchestrated daily_close run + mart parity, SCD2, dead-letter,
+lineage and metrics assertions) and exits non-zero on any mismatch.
 
 ### Lineage (Phase 4, ADR-012)
 
@@ -69,6 +71,33 @@ make run-etl          # a full close emits fresh events (dbt_build runs dbt-ol; 
 
 The pipeline is non-fatal when Marquez is down (drilled: full close green with
 the api stopped; events resume on return — `EVIDENCE/phase-4-lineage/drill-marquez-down.log`).
+
+### Metrics & alerting (Phase 4, ADR-013)
+
+Airflow 2.10.5 emits StatsD (the only metrics egress the installed version
+has — verified in the running image; names verified against the installed
+source, not blogs) → `statsd-exporter` maps the name-encoded legacy metrics
+(`airflow_task_finish_total{dag_id,task_id,state}`,
+`airflow_dagrun_duration_seconds{dag_id,status}` histogram,
+`airflow_scheduler_heartbeat`) → Prometheus scrapes + evaluates three alert
+rules → Grafana renders [dashboards as code](observability/grafana/).
+Row counts and task durations are read-only SQL pulls (warehouse-db /
+airflow-db datasources) — observability only ever pulls; UDP is
+dropped-not-queued; no `depends_on` touches the metrics stack. Drills:
+`make metrics-drill` (a rule genuinely fires on a stopped scraped target,
+then recovers) and the full-stack non-fatal drill (two closes green with
+Prometheus + Grafana + the exporter stopped; `NoStatsLogger` fallback in the
+scheduler's own logs) — `EVIDENCE/phase-4-metrics.md`.
+
+```bash
+make metrics-verify   # API-asserted: targets up, rules loaded, real metric values, Grafana provisioning; dumps EVIDENCE
+make metrics-drill    # alert fire-drill: stop a scraped target → HeliosScrapeTargetDown fires → restart → resolves
+```
+
+Honest ceiling: NO Alertmanager and no push channel exists — rules surface as
+the ALERTS series, Prometheus `/alerts`, and the dashboard's firing-alerts
+table; nothing notifies anyone. Metrics history is derived ephemeral state
+(wipe story in ADR-013 D4: not re-derivable, unlike lineage).
 
 ## Architecture (target — components annotated with the phase that delivers them)
 
@@ -100,7 +129,9 @@ flowchart LR
     GE["Great Expectations gate<br/>semantic suites over frozen<br/>staging+marts (Ph.4, ADR-011)"]
     DQ[("dq.dq_quarantine<br/>dead-letter + replay")]
     LIN["Marquez (Ph.4, ADR-012)<br/>api :5000 - web UI :3000<br/>own Postgres; table+column lineage<br/>raw sources → staging → marts"]
-    PROM["Prometheus + Grafana (Ph.4)"]
+    SD["statsd-exporter (Ph.4, ADR-013)<br/>static IP on metrics-net<br/>mapping as code"]
+    PROM["Prometheus (Ph.4, ADR-013)<br/>:9091 - scrape + alert rules<br/>TSDB on named volume"]
+    GRAF["Grafana (Ph.4, ADR-013)<br/>:3001 - dashboards as code<br/>read-only SQL pulls"]
 
     SOAP --> ING
     FF --> ING
@@ -115,7 +146,11 @@ flowchart LR
     ORCH --> GE
     ORCH -.->|task/run events| LIN
     DBT -.->|dbt-ol: dataset + column-lineage events| LIN
-    PROM -.-> ORCH
+    ORCH -.->|StatsD UDP: task/dagrun metrics| SD
+    SD --> PROM
+    PROM --> GRAF
+    GRAF -.->|read-only SQL: row counts + task durations| WH
+    GRAF -.->|pull| PROM
 ```
 
 The shipped reality always outruns this static file — [STATE.md](STATE.md) is the
@@ -205,7 +240,8 @@ dags/                  (Ph.3) Airflow DAGs
 dbt/                   (Ph.3 ✅ staging) dbt project: 9 typed staging models over raw,
                        PII hashing (SHA-256 + env salt), freshness + 81 tests (ADR-008)
 dq/                    (Ph.4) Great Expectations suites + quarantine
-observability/         (Ph.4) Prometheus/Grafana config, Marquez
+observability/         (Ph.4 ✅) statsd-exporter mapping, Prometheus scrape+rules,
+                       Grafana datasources+dashboard — all as code (ADR-013)
 DECISIONS/             ADRs — why the platform looks like this
 EVIDENCE/              verifier logs + metrics; the source of every number we claim
 docs/                  RUNBOOK.md, DATA_DICTIONARY.md, INTERVIEW_DEFENSE.md

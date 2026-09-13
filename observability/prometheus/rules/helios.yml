@@ -1,0 +1,42 @@
+# ADR-013 D6 — the honest alerting ceiling. These rules are evaluated by
+# Prometheus; their results are the ALERTS series, /api/v1/alerts + /alerts,
+# and the dashboard's ALERTS panel. NO push channel exists (no Alertmanager —
+# nothing here notifies anyone; that is the documented ceiling, not a fake).
+groups:
+  - name: helios-pipeline
+    rules:
+      # The fire-drill rule (make metrics-drill): a STOPPED scraped target
+      # records up=0 on the next failed scrape. Bootstrap limit, stated in
+      # ink: if Prometheus itself is down, nothing alerts — external
+      # liveness checks are the production answer (ADR-013 D6 residual).
+      - alert: HeliosScrapeTargetDown
+        expr: up{job=~"statsd-exporter|grafana"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "HELIOS scrape target down ({{ $labels.job }})"
+          description: "Prometheus cannot scrape {{ $labels.job }} (up=0 for 30s). Metrics for this window are being dropped (UDP fire-and-forget / missed scrapes are never backfilled — ADR-013 D4 wipe story)."
+      # The ADR-011 D8 reconciliation: "the alert IS the gate" stays true (a
+      # dq_gate failure reddens the DAG, the quarantine table, the exit
+      # code); this rule surfaces the SAME event to Prometheus via the
+      # task-failure counter (airflow_task_finish_total{state="failed"} —
+      # the mapped ti.finish.*.*.* StatsD metric, ADR-013 D2).
+      - alert: HeliosAirflowTaskFailure
+        expr: sum(increase(airflow_task_finish_total{state="failed"}[10m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Airflow task failure in the last 10m"
+          description: "At least one Airflow task instance finished failed. Gate semantics live in the DAG (ADR-011 D8); this is the observability surface of the same event."
+      # Staleness: the nightly 05:00 UTC close has not completed — or its
+      # metrics never reached the scraper — within 26h. Fires legitimately
+      # before the first post-wiring run (that is the truth, not noise).
+      - alert: HeliosDailyCloseStale
+        expr: absent_over_time(airflow_dagrun_duration_seconds_count{dag_id="daily_close",status="success"}[26h])
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful daily_close recorded in 26h"
+          description: "No airflow_dagrun_duration_seconds_count{status=success} sample for daily_close in 26h (schedule: daily 05:00 UTC). Check Airflow and the statsd-exporter path."

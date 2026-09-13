@@ -40,7 +40,15 @@ af dags trigger "$DAG_ID" -r "$RUN_ID" -e "$EXEC_DATE" >/dev/null || fail "airfl
 echo "[run-etl] polling every ${POLL_S}s, timeout ${TIMEOUT_S}s ..."
 deadline=$(( $(date +%s) + TIMEOUT_S ))
 while :; do
-  state="$(af dags state "$DAG_ID" "$EXEC_DATE" 2>/dev/null || echo pending)"
+  # Dag-run state is read from the metadata DB via SQL, NOT from
+  # `airflow dags state` CLI output: CLI stdout interleaves log lines, and
+  # during a metrics-stack outage the StatsClient fallback ERROR line
+  # ("Could not configure StatsClient ... using NoStatsLogger", ADR-013 D7
+  # drill, 2026-09-13) polluted the state parse ('...ERROR...running') and
+  # failed the driver while the pipeline itself was healthy. SQL is immune.
+  state="$(docker compose exec -T airflow-db psql -U airflow -d airflow -tAc \
+    "SELECT state FROM dag_run WHERE dag_id='$DAG_ID' AND run_id='$RUN_ID'" | tail -1)"
+  [ -z "$state" ] && state=pending   # row not created yet (trigger committed)
   case "$state" in
     success)
       # Guard against the vacuous-success trap (measured 2026-09-11): a run whose

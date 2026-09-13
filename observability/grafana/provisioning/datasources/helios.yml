@@ -1,0 +1,45 @@
+# ADR-013 D5 — datasources provisioned as code. DB credentials arrive via
+# env interpolation ($VAR — Grafana provisioning supports values-only env
+# substitution), so no credential literal exists in this file. All three are
+# read-only PULL datasources: observability never pushes (ADR-013 D7).
+apiVersion: 1
+
+datasources:
+  - name: Helios-Prometheus
+    uid: helios-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Helios-Warehouse
+    uid: helios-warehouse
+    type: postgres
+    access: proxy
+    url: warehouse-db:5432
+    user: $WAREHOUSE_POSTGRES_USER
+    secureJsonData:
+      password: $WAREHOUSE_POSTGRES_PASSWORD
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      # Grafana 13: the database name MUST live in jsonData.database — a
+      # top-level `database:` field provisions but leaves queries failing
+      # with "no default database configured" (found by boot verification).
+      database: warehouse
+    editable: false
+
+  - name: Helios-Airflow
+    uid: helios-airflow
+    type: postgres
+    access: proxy
+    url: airflow-db:5432
+    user: airflow
+    secureJsonData:
+      password: $AIRFLOW_DB_PASSWORD
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      database: airflow
+    editable: false

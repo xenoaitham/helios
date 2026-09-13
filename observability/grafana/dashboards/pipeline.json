@@ -1,0 +1,212 @@
+{
+  "uid": "helios-pipeline",
+  "title": "HELIOS — Pipeline observability",
+  "description": "ADR-013 D5: pipeline duration (dag-run histogram quantiles), failures (task outcome counters), row counts (read-only pulls from warehouse-db), task durations (Airflow metadata DB — the measured duration boundary, ADR-013 D2), and the firing-alerts table. All panels are fed by real surfaces: mapped StatsD metric names (ADR-013 D2) or SQL against real tables.",
+  "tags": ["helios"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Dag-run duration (histogram quantiles)",
+      "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le, dag_id, status) (airflow_dagrun_duration_seconds_bucket))",
+          "legendFormat": "p50 {{dag_id}} {{status}}",
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, dag_id, status) (airflow_dagrun_duration_seconds_bucket))",
+          "legendFormat": "p95 {{dag_id}} {{status}}",
+          "instant": false,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Task outcomes (increase per rate interval, by state)",
+      "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+          "expr": "sum by (state) (increase(airflow_task_finish_total[$__rate_interval]))",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Failed tasks (24h)",
+      "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+          "expr": "sum(increase(airflow_task_finish_total{state=\"failed\"}[24h]))",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "dq dead-letter open incidents",
+      "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+          "rawSql": "SELECT count(*) AS open_incidents FROM dq.dq_quarantine WHERE resolved_at IS NULL",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Firing alerts (Prometheus ALERTS series)",
+      "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "helios-prometheus" },
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "marts.fct_orders rows",
+      "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 13 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none", "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+          "rawSql": "SELECT count(*) FROM marts.fct_orders",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "marts.fct_order_items rows",
+      "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 13 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none", "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+          "rawSql": "SELECT count(*) FROM marts.fct_order_items",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "raw.cdc_orders rows (CDC raw zone)",
+      "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 13 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none", "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+          "rawSql": "SELECT count(*) FROM raw.cdc_orders",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "dim_customer current rows (SCD2)",
+      "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 13 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none", "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "helios-warehouse" },
+          "rawSql": "SELECT count(*) FROM marts.dim_customer WHERE is_current",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Recent daily_close task durations (Airflow metadata DB — the measured duration boundary, ADR-013 D2)",
+      "datasource": { "type": "postgres", "uid": "helios-airflow" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "helios-airflow" },
+          "rawSql": "SELECT task_id, run_id, state, ROUND(duration::numeric, 1) AS duration_s, start_date FROM task_instance WHERE dag_id = 'daily_close' ORDER BY start_date DESC LIMIT 20",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

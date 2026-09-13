@@ -1,0 +1,17 @@
+# ADR-013 D5 — dashboards as code: Grafana loads dashboard JSON from the
+# repo-mounted path at container start (and re-polls it). Hand-built
+# snowflakes that die with a volume are forbidden by the wipe story (D4):
+# the dashboard IS code; only its history is state.
+apiVersion: 1
+
+providers:
+  - name: helios
+    orgId: 1
+    folder: Helios
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

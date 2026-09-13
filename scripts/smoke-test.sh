@@ -22,7 +22,7 @@ STAGE1_FAIL=0
 
 echo "===== Stage 1: infrastructure ====="
 
-for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service cdc-connect cdc-sink marquez-db marquez-api marquez-web; do
+for svc in oltp-db warehouse-db airflow-db kafka airflow-webserver airflow-scheduler soap-service cdc-connect cdc-sink marquez-db marquez-api marquez-web statsd-exporter prometheus grafana; do
   status="$(docker inspect -f '{{.State.Health.Status}}' "helios-${svc}" 2>/dev/null || echo missing)"
   if [ "$status" = "healthy" ]; then
     echo "[ok]   container $svc healthy"
@@ -101,6 +101,13 @@ if docker exec helios-cdc-sink python -c "import urllib.request,json,sys;r=json.
   echo "[ok]   Debezium connector helios-oltp RUNNING"
 else
   echo "[FAIL] Debezium connector helios-oltp not RUNNING (see make cdc-status)"; STAGE1_FAIL=1
+fi
+
+# --- Phase 4 (ADR-013): the metrics stack answers (the SQL-probe analog) ---
+if curl -sf "http://localhost:${PROMETHEUS_PORT:-9091}/-/ready" 2>/dev/null | grep -q "Ready"; then
+  echo "[ok]   prometheus answers /-/ready on :${PROMETHEUS_PORT:-9091}"
+else
+  echo "[FAIL] prometheus not answering on :${PROMETHEUS_PORT:-9091}"; STAGE1_FAIL=1
 fi
 
 echo
@@ -230,6 +237,46 @@ else
     lineage_fail "marquez: column-lineage graph for fct_orders empty"
   fi
 fi
+
+# --- Phase 4 (ADR-013): MEASURED metrics, asserted via the Prometheus API.
+# The orchestrated run above just emitted task/dagrun events through
+# StatsD -> statsd-exporter; these assert the scrape is REAL and a known
+# metric exists with a real value (exactly the growth item 12 justifies —
+# no wholesale additions; the lineage block above is the regression guard).
+# A down Prometheus here is a FAIL: the platform's declared state includes
+# the metrics stack (the non-fatal contract is proven separately by the
+# metrics-stack-down drill, ADR-013 D7). ---
+PROM="http://localhost:${PROMETHEUS_PORT:-9091}"
+pq() { curl -sf --max-time 15 "$PROM/api/v1/query" --data-urlencode "query=$1" 2>/dev/null || true; }
+
+metrics_ok() { echo "[ok]   $1"; }
+metrics_fail() { echo "[FAIL] $1"; STAGE2_FAIL=1; }
+
+# metrics_present NAME PY-CHECK QUERY — retry ≤30s (two scrape intervals):
+# the run's terminal datagrams (e.g. the dagrun duration, emitted at run
+# completion) can land after the last scrape before run-etl returns; a
+# scrape-interval race is not a broken chain (measured 2026-09-13).
+metrics_present() {
+  local name="$1" check="$2" query="$3" json="" ok=0 n
+  for n in 1 2 3 4 5 6; do
+    json="$(pq "$query")"
+    if [ -n "$json" ] && python3 -c "$check" <<< "$json"; then ok=1; break; fi
+    sleep 5
+  done
+  if [ "$ok" = 1 ]; then metrics_ok "$name"; else metrics_fail "$name"; fi
+}
+
+metrics_present "prometheus scrapes statsd-exporter (up == 1)" \
+  'import json,sys; r=json.load(sys.stdin)["data"]["result"]; sys.exit(0 if any(x["value"][1]=="1" for x in r) else 1)' \
+  'up{job="statsd-exporter"}'
+
+metrics_present "airflow_task_finish_total{dag_id=daily_close} present with real values (failure/success surface measured)" \
+  'import json,sys; r=json.load(sys.stdin)["data"]["result"]; sys.exit(0 if r and sum(float(x["value"][1]) for x in r) >= 1 else 1)' \
+  'sum(airflow_task_finish_total{dag_id="daily_close"})'
+
+metrics_present "airflow_dagrun_duration_seconds histogram populated (duration surface measured)" \
+  'import json,sys; r=json.load(sys.stdin)["data"]["result"]; sys.exit(0 if r and sum(float(x["value"][1]) for x in r) >= 1 else 1)' \
+  'airflow_dagrun_duration_seconds_count{dag_id="daily_close",status="success"}'
 
 echo
 if [ "$STAGE2_FAIL" -ne 0 ]; then

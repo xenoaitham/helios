@@ -111,7 +111,7 @@ Phase 3 additions (Airflow orchestration, ADR-010):
 | `make run-etl` | Unpause → trigger master `daily_close` → poll to terminal state; nonzero exit on failure/timeout (a run counts as success only with all task instances green) |
 | `make backfill` | Honest replay-based backfill: semantics banner + full `daily_close` replay + run-ledger tail (ADR-010 D5) |
 | `make airflow-logs` | Follow scheduler + webserver logs |
-| `make smoke-test` | Stage 1 (19 infra checks) + Stage 2: a real orchestrated run + mart parity + SCD2 assertions (exit 0) |
+| `make smoke-test` | Stage 1 (26 infra checks) + Stage 2: a real orchestrated run + mart parity + SCD2 + dead-letter + lineage + metrics assertions (exit 0) |
 
 Orchestrator notes a stranger needs:
 
@@ -145,6 +145,46 @@ Orchestrator notes a stranger needs:
   scheduler's repo mount + DAG tasks `cd` there; bind-source parity, ADR-010
   D1). Missing var = loud interpolation error by design.
 
+Phase 4 additions (metrics, ADR-013):
+
+| Command | Effect |
+|---|---|
+| `make metrics-verify` | Assert MEASURED metrics via the Prometheus/Grafana APIs (targets up, rules loaded, mapped metric names in the exporter, real query values, provisioned datasources + dashboard) and dump evidence to `EVIDENCE/phase-4-metrics/`; nonzero on any missing surface |
+| `make metrics-drill` | Alert fire-drill: stop `statsd-exporter` (a genuinely scraped target) → assert `HeliosScrapeTargetDown` FIRES via `/api/v1/alerts` → restart → assert recovery; dumps `EVIDENCE/phase-4-metrics/drill/` |
+
+Metrics operations a stranger needs:
+
+- **Topology**: Airflow 2.10.5 → StatsD UDP :9125 (fire-and-forget:
+  dropped-not-queued — the scheduler logs
+  `using NoStatsLogger instead` and carries on) → `statsd-exporter`
+  (mapping as code in `observability/statsd-exporter/`; static IP
+  `172.31.0.9` on the `metrics-net` network — the airflow client caches the
+  resolved destination for its process lifetime, so the exporter must keep
+  that address across restarts; ADR-013 D7 amended) → Prometheus :9091
+  (scrape + rules from `observability/prometheus/`) → Grafana :3001
+  (dashboards + datasources provisioned from `observability/grafana/`).
+- **Alerting ceiling (honest)**: three Prometheus rules —
+  `HeliosScrapeTargetDown` (`up==0`), `HeliosAirflowTaskFailure`
+  (`increase(airflow_task_finish_total{state="failed"}[10m]) > 0`),
+  `HeliosDailyCloseStale` (`absent_over_time(...success...[26h])` — fires
+  legitimately on a fresh stack until the first successful close). They
+  surface as the ALERTS series, Prometheus `/alerts`, and the Grafana
+  firing-alerts panel. NO Alertmanager / push channel exists — nothing
+  notifies anyone; that is the documented ceiling, not a fake.
+- **Changing the exporter mapping / Grafana dashboards**: edit the files
+  under `observability/` — dashboards re-provision automatically (file
+  watcher); an exporter mapping change is a `docker compose restart
+  statsd-exporter` away. The static IP makes BOTH safe for the metric flow.
+- **Wipe story**: dashboards/rules/config are code; the TSDB
+  (`prometheus_data`) and Grafana state (`grafana_data`) are derived
+  EPHEMERAL volumes — metrics history is NOT re-derivable (unlike lineage);
+  `make clean` deletes them by design.
+- **Row counts / task durations in the dashboard** are read-only SQL pulls
+  (warehouse-db / airflow-db datasources, credentials via env interpolation
+  into the grafana container). If the Postgres panels show "No data": check
+  datasource health (`curl -su admin:… :3001/api/datasources/uid/helios-warehouse/health`)
+  — and remember Grafana 13 wants the DB name in `jsonData.database`.
+
 ## 2. Endpoints & credentials
 
 All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:
@@ -158,6 +198,13 @@ All credentials live in `.env` (defaults in `.env.example`). Currently surfaced:
   (`SOAP_BASIC_AUTH_USER` / `SOAP_BASIC_AUTH_PASSWORD`) required on every path including
   the WSDL; `/health` is the only unauthenticated endpoint (container healthcheck).
   401 + `WWW-Authenticate` on missing/bad credentials.
+- **Marquez lineage UI** (ADR-012): `http://localhost:${MARQUEZ_WEB_PORT}` (UI),
+  `http://localhost:${MARQUEZ_API_PORT}` (lineage REST), admin `:5001/healthcheck` —
+  unauthenticated, local dev.
+- **Grafana** (ADR-013): `http://localhost:${GRAFANA_PORT}` —
+  `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` (basic auth).
+- **Prometheus** (ADR-013): `http://localhost:${PROMETHEUS_PORT}` — unauthenticated,
+  local dev (targets, rules, `/alerts`, `/api/v1/*`).
 
 Quick SOAP checks from host:
 

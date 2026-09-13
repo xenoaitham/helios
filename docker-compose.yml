@@ -32,6 +32,15 @@
 #                  Dropwizard admin :5001 (healthcheck); own schema migrations
 #                  on boot; custom config takes db creds from env (ADR-012 D5)
 #   marquez-web    Marquez UI :3000 — graph + column-level lineage views
+#   statsd-exporter prom/statsd-exporter — the StatsD→Prometheus bridge for
+#                  Airflow 2.10.5's metrics (UDP :9125 in-net, /metrics :9102;
+#                  mapping as code in observability/) — ADR-013 D2/D4
+#   prometheus     Prometheus 3 — scrapes the metrics stack, evaluates alert
+#                  rules (observability/prometheus/), TSDB on a named volume;
+#                  host :9091 (:9090 taken by another local project)
+#   grafana        Grafana 13 — dashboards-as-code (observability/grafana/),
+#                  read-only pulls of Prometheus + warehouse-db + airflow-db;
+#                  host :3001 (:3000 taken by marquez-web)
 #
 # All credentials come from .env (see .env.example).
 
@@ -64,12 +73,33 @@ x-airflow-common: &airflow-common
     # (listener try/except + forked, 10s timeout) — never on the write path.
     AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type": "http", "url": "http://marquez-api:5000", "endpoint": "api/v1/lineage"}'
     AIRFLOW__OPENLINEAGE__NAMESPACE: helios
+    # ADR-013 D3: pipeline metrics via StatsD -> statsd-exporter (UDP,
+    # fire-and-forget — dropped-not-queued; observability is never on the
+    # write path, D7). The client ships in the 2.10.5 base image (probed:
+    # `import statsd` succeeds) — env-only wiring, zero image delta. Plain
+    # statsd carries NO tags (statsd_influxdb_enabled stays False): the
+    # name-encoded legacy metrics are the wire surface (ADR-013 D2).
+    AIRFLOW__METRICS__STATSD_ON: "True"
+    # ADR-013 D7 (amended 2026-09-13): the statsd pip client resolves the host
+    # ONCE per process (getaddrinfo -> cached numeric addr, statsd/client/udp.py)
+    # — an exporter IP change would silently orphan every long-lived airflow
+    # process's metrics (dropped-not-queued). The exporter therefore holds a
+    # STATIC IP on the dedicated metrics-net and STATSD_HOST targets that
+    # address directly: the cached destination survives any exporter restart.
+    AIRFLOW__METRICS__STATSD_HOST: 172.31.0.9
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow
     # Absolute host path of the repo (exported by the Makefile / scripts). DAG
     # tasks `cd` here and run docker compose from it; the scheduler mounts the
     # repo read-only at THIS EXACT path so in-scheduler compose resolves
     # relative bind-mount sources to the same host paths compose-on-host does
     # (bind-source parity, ADR-010 D1).
     HELIOS_PROJECT_DIR: ${HELIOS_PROJECT_DIR:?exported by the Makefile; export it before running docker compose by hand}
+  # ADR-013 D7 (amended): airflow services join metrics-net so their StatsD
+  # datagrams reach the exporter's static address (see STATSD_HOST above).
+  networks:
+    - default
+    - metrics-net
   volumes:
     - ./dags:/opt/airflow/dags
     - airflow_logs:/opt/airflow/logs
@@ -570,6 +600,100 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # --- Phase 4 item 12 (ADR-013): the metrics stack ---------------------------
+  # Each container individually earned (D4): the exporter is the ONLY bridge
+  # from Airflow 2.10.5's StatsD surface to Prometheus (no native endpoint
+  # exists — measured in the installed image); Prometheus and Grafana are
+  # pure PULL services. NO depends_on binds the pipeline to any of these —
+  # observability is never on the write path (D7): StatsD datagrams are
+  # dropped-not-queued when the exporter is down, scrape targets going away
+  # merely record up=0 (and fire HeliosScrapeTargetDown), and Grafana panels
+  # error visibly without touching any writer.
+  #
+  # Port collisions (measured on this host): host :9090 is taken by another
+  # local project's prometheus and host :3000 by our own marquez-web (ADR-012)
+  # — host knobs are PROMETHEUS_PORT=:9091 and GRAFANA_PORT=:3001; in-net the
+  # upstream defaults (:9090/:3000/:9125/:9102) are kept.
+  #
+  # Dashboards, datasources, scrape config, rules and the exporter mapping are
+  # CODE in observability/ (mounted ro). The TSDB and Grafana state live in
+  # named volumes — derived EPHEMERAL state, NOT re-derivable: a window whose
+  # metrics never reached the scraper is gone forever (the honest difference
+  # from lineage, ADR-012 D5).
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.31.0
+    container_name: helios-statsd-exporter
+    # Static IP on metrics-net (ADR-013 D7 amended): the airflow StatsD client
+    # caches the resolved destination for its process lifetime — the static
+    # address keeps that cache valid across ANY exporter restart/recreate.
+    networks:
+      default: {}
+      metrics-net:
+        ipv4_address: 172.31.0.9
+    command:
+      - --statsd.listen-udp=:9125
+      - --statsd.listen-tcp=:9125
+      - --web.listen-address=:9102
+      - --statsd.mapping-config=/etc/statsd-exporter/mappings.yml
+    volumes:
+      - ./observability/statsd-exporter/mappings.yml:/etc/statsd-exporter/mappings.yml:ro
+    # the prom/statsd images ship wget (probed on v0.31.0)
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9102/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    container_name: helios-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.0.8
+    container_name: helios-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana_local_dev}
+      # ADR-013 D5: the datasource provisioning YAML interpolates env vars
+      # against THIS container's environment — the DB credentials must be
+      # present here or the provisioned datasources resolve empty (found by
+      # boot verification: panels "No data", health API "password
+      # authentication failed for user grafana").
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_local_dev}
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
 volumes:
   oltp_data:
   warehouse_data:
@@ -579,3 +703,14 @@ volumes:
   soap_data:
   filedrop_data:
   marquez_db_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  # ADR-013 D7 (amended 2026-09-13): dedicated network with a FIXED subnet so
+  # statsd-exporter can hold the static address the airflow processes target.
+  metrics-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
