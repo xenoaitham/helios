@@ -10,7 +10,7 @@ ENV_FILE := .env
 export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill airflow-image run-etl backfill airflow-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill chaos-test airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -181,6 +181,15 @@ metrics-verify: ## Prove measured metrics via the Prometheus/Grafana APIs; dump 
 
 metrics-drill: ## Alert fire-drill: stop statsd-exporter, assert HeliosScrapeTargetDown fires, restart, assert recovery
 	bash scripts/metrics-drill.sh
+
+# --- Phase 5 item 13: chaos-test (ADR-014). Scripted destructive scenarios
+# (kill worker mid-DAG, kill DB mid-load, poison CDC/CSV, schema drift, API
+# outage) — each asserts the platform DEGRADES SAFELY and ends with a
+# measured convergence proof; full transcripts land in EVIDENCE/chaos-*.log.
+# Destructive BY DESIGN and re-runnable (ADR-014 D7); smoke-test stays the
+# green-state guard and does not grow. One scenario: make chaos-test SCENARIO=kill_worker
+chaos-test: ## Chaos drills (all 7, ~60-90 min) or one: SCENARIO=01|kill_worker|poison_cdc|...
+	bash scripts/chaos-test.sh $(SCENARIO)
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

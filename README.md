@@ -99,6 +99,42 @@ the ALERTS series, Prometheus `/alerts`, and the dashboard's firing-alerts
 table; nothing notifies anyone. Metrics history is derived ephemeral state
 (wipe story in ADR-013 D4: not re-derivable, unlike lineage).
 
+### Chaos engineering (Phase 5, ADR-014)
+
+Seven scripted destructive scenarios — each one: pre-state measurement →
+chaos act → assert the platform DEGRADES SAFELY (named mechanism, measured
+while degraded) → recovery → a measured convergence proof. Full transcripts
+in `EVIDENCE/chaos-*.log`, roll-up with the numbers in
+`EVIDENCE/phase-5-chaos.md`:
+
+```bash
+make chaos-test                      # all 7, in order (~60-90 min wall, measured)
+make chaos-test SCENARIO=poison_cdc  # one scenario: number (01..07) or name
+```
+
+Scenarios: `kill_worker` (SIGKILL the dbt one-shot mid-build → the Airflow
+task retry converges the SAME run; snapshot invariant bit-identical),
+`kill_warehouse_midbuild` (warehouse-db down mid-build → the build fails
+loudly, the published layer is never partial — dbt commits per-model, so
+every target is a complete replacement — and the retry rebuilds on the
+restored DB),
+`kill_oltp_midcdc` (source down → the replication slot holds; **measured: a
+FAILED Debezium task does not self-recover — the scripted recovery restarts
+the task via the Connect API**; retained WAL peak/drain measured),
+`poison_cdc` / `poison_csv` (the Session-9 injections scripted: gate red →
+dead-letter → **HeliosAirflowTaskFailure fires, 70–80 s measured** → source
+fix → green close → `dq-replay` resolves; row-level targeting re-proven),
+`schema_drift` (ADD COLUMN proven invisible end-to-end — the honest gap —
+plus a guarded rename probe: the mutator fails loudly, the pipeline would
+not detect it either; both reverted), `api_outage` (**the dependency
+contract self-heals stopped/paused/partitioned sources — measured 3 ways —
+so the outage is a watchdog-enforced network partition; task failures are
+loud, in-run retries converge, raw counts bit-identical**).
+
+Destructive by design, re-runnable (ADR-014 D7): quarantine only ever grows
+by RESOLVED audit rows; `dq.dq_quarantine` ends 0 OPEN. Smoke-test is the
+green-state guard and does not grow.
+
 ## Architecture (target — components annotated with the phase that delivers them)
 
 ```mermaid
