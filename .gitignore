@@ -32,6 +32,7 @@ airflow-logs/
 .v2c/
 out/
 site/
+push-public.sh
 
 # local working docs + local verification records (kept on disk, not published)
 STATE.md
