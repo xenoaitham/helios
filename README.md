@@ -313,8 +313,8 @@ dq/                    Great Expectations suites + dead-letter quarantine + repl
 observability/         statsd-exporter mapping, Prometheus scrape+rules,
                        Grafana datasources+dashboard - all as code
 DECISIONS/             ADRs - why the platform looks like this
-docs/                  RUNBOOK.md (operate + recovery drill), DATA_DICTIONARY.md (schemas +
-                       PII), DESIGN_NOTES.md (design Q&A), index.html
+docs/                  RUNBOOK.md (operate + recovery drill), DATA_DICTIONARY.md
+                       (schemas + PII), index.html
 screenshots/           real captures of the live UIs (see above)
 ```
 
@@ -322,5 +322,5 @@ screenshots/           real captures of the live UIs (see above)
 
 See [docs/RUNBOOK.md](docs/RUNBOOK.md) - start/stop, health, logs, destructive ops,
 the recovery drill, troubleshooting, and the rootless-Docker bootstrap used on the
-machine this was built on. The design reasoning lives in
-[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) and the [ADRs](DECISIONS/).
+machine this was built on. The reasoning behind each component lives in the
+[ADRs](DECISIONS/).
