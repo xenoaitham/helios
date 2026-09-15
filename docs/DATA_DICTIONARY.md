@@ -1,7 +1,9 @@
 # DATA DICTIONARY — HELIOS
 
-Filled from Phase 1 onward; the structure below is the contract every future table entry
-follows.
+Complete through Phase 6. Column lists below were verified against the LIVE
+schemas (`information_schema` on `oltp-db` and `warehouse-db`) on 2026-09-15 —
+not from memory. Living row counts are labeled "as of" with their date; the
+mutator moves them hourly, so measure rather than trust any count.
 
 ## Policy
 
@@ -18,7 +20,12 @@ follows.
   joinability across feeds at exact-match granularity while removing cleartext PII from
   all consumer-facing schemas; salt lives outside the repo; determinism is required for
   SCD2 change detection on identity fields.
-- The DQ gate (Phase 4) includes a test that marts contain no cleartext PII patterns.
+- Marts PII-freedom is enforced by CONSTRUCTION (the staging models select only
+  `*_hash` — the cleartext column never enters the dbt DAG) and PROVEN by SQL
+  audits (`EVIDENCE/phase-3-marts.md`: 0 cleartext columns, 0 non-hex hashes)
+  plus a smoke assertion. The GE gate owns business semantics (ADR-011 D2: 6
+  suites / 10 expectations — money sign policy, line sanity, feed sanity,
+  temporal coherence, published money), NOT PII pattern-matching.
 
 ## Tables
 
@@ -32,7 +39,7 @@ Raw/staging/mart destinations are filled in when Phase 2/3 land the extraction. 
 **CDC landing tables** below arrived with Phase 2 (ADR-005); the rest follow with the
 ingest lib (Phase 2) and dbt staging (Phase 3).
 
-`orders` (~382k rows seeded):
+`orders` (382,179 rows — seeded once at Phase 1, never reseeded; invariant):
 
 | Column | Type | Null | Notes | PII class |
 |---|---|---|---|---|
@@ -88,8 +95,9 @@ emails use RFC-2606 `example.com` domains on purpose.
 | country_code | TEXT | no | 2-letter ISO-ish from a 10-value pool | masked (quasi-identifier) |
 | created_at / last_login_at | TIMESTAMPTZ | last_login nullable | last_login is the mutator's touch column | none |
 | is_active | BOOLEAN | no | 95% true | none |
+| loyalty_tier | TEXT | yes | **ALL VALUES NULL.** Not in the seed schema: added by the chaos-06 Act-A probe (`ALTER TABLE users ADD COLUMN loyalty_tier text`, 2026-09-14, ADR-014) and left in place BY DESIGN — dropping it would itself be a drift event, and a NULL column is inert: `staging.stg_users` does not select it, Debezium ships it as `"loyalty_tier": null` in every after-image, and the JSONB raw landing absorbs it. It stands as the queryable, live exhibit of the additive-drift gap (found standing by the Phase-6 docs sweep, ADR-016 D4) | none |
 
-`orders` (500,000+ rows, grows/shrinks with the mutator):
+`orders` (762,261 rows as of 2026-09-15 — grows/shrinks with the mutator):
 
 | Column | Type | Null | Notes | PII class |
 |---|---|---|---|---|
@@ -101,7 +109,7 @@ emails use RFC-2606 `example.com` domains on purpose.
 | placed_at | TIMESTAMPTZ | no | uniform over 3 years; `idx_orders_placed_at` = Phase-2 watermark index | none |
 | updated_at | TIMESTAMPTZ | no | advances on mutator status walks (CDC-friendly) | none |
 
-`order_items` (~4.25M rows):
+`order_items` (5,568,905 rows as of 2026-09-15):
 
 | Column | Type | Null | Notes | PII class |
 |---|---|---|---|---|
@@ -111,7 +119,7 @@ emails use RFC-2606 `example.com` domains on purpose.
 | quantity | INTEGER | no | 1..5 | none |
 | unit_price | NUMERIC(10,2) | no | $1.99–$151.98 | none |
 
-`payments` (600k+ rows):
+`payments` (854,184 rows as of 2026-09-15):
 
 | Column | Type | Null | Notes | PII class |
 |---|---|---|---|---|
@@ -188,15 +196,49 @@ tombstone rows (staging filters them in Phase 3), so
 `count(*) WHERE op <> 'd'` tracks the live source row count (verified equal in
 `make cdc-verify` stage [2]).
 
+## Warehouse raw zone — batch landing + ledgers (Phase 2, ADR-007)
+
+The batch extractors land into per-source natural-key tables; the shared shape
+is `⟨natural_key, load_id, batch_ref, content_hash, payload JSONB, landed_at⟩`
+(content-hash-guarded upserts = a physical no-op on replay). Columns verified
+against the live warehouse 2026-09-15:
+
+| Table | Natural key | Payload PII |
+|---|---|---|
+| `raw.soap_orders` | `order_id` | none (SOAP holds no identifiers) |
+| `raw.file_customers` | `customer_id` | **cleartext `email` / `full_name` inside `payload`** — the landing-zone contract: raw is source-shaped; hashing happens at staging (ADR-008) |
+| `raw.file_products` | `sku` | none |
+| `raw.rest_products` | `id` | none |
+| `raw.rest_promotions` | `id` | none |
+
+Ledger tables (the replay/idempotence bookkeeping):
+
+| Table | Columns | Role |
+|---|---|---|
+| `raw.ingest_watermarks` | source, watermark_value, watermark_kind, updated_at | per-source incremental cursors (ADR-006) |
+| `raw.ingest_files` | filename, file_hash, size_bytes, load_id, rows_read, rows_landed, rows_quarantined, landed_at | file hash ledger — a file is re-processed only when its BYTES change, never on filename dates |
+| `raw.ingest_loads` | load_id, source, batch_ref, status, rows_read, rows_landed, rows_unchanged, rows_quarantined, units_done, units_total, error, started_at, finished_at | run ledger — the zero-work proof for every replay |
+| `raw.ingest_quarantine` | quarantine_id, source, batch_ref, filename, row_number, reason, raw_content, load_id, quarantined_at | row-level rejects with physical row numbers (dirty-CSV triage) |
+
 ## Warehouse staging schema (Phase 3, ADR-008) — dbt's first tenant
 
 Nine dbt models, materialized as tables and rebuilt full on every
 `make dbt-build`; CDC current state = `op <> 'd'` over the raw envelopes; batch
 payloads extracted + typed. Provenance: CDC models carry `_cdc_lsn`, batch models
-`_batch_ref` (joins to the ADR-007 run ledger). Models: `stg_users`,
-`stg_orders`, `stg_order_items`, `stg_payments`, `stg_soap_orders`,
-`stg_file_customers`, `stg_file_products`, `stg_rest_products`,
-`stg_rest_promotions`.
+`_batch_ref` (joins to the ADR-007 run ledger). Models with their live column
+lists (verified 2026-09-15; `⟨k⟩_hash` = the ADR-008 D1 formula):
+
+| Model | Columns (beyond provenance) |
+|---|---|
+| `stg_users` | user_id, **email_hash, full_name_hash**, country_code, is_active, created_at, last_login_at (`_cdc_lsn`) |
+| `stg_orders` | order_id, user_id, status, currency, total_amount, placed_at, updated_at (`_cdc_lsn`) |
+| `stg_order_items` | order_item_id, order_id, product_sku, quantity, unit_price (`_cdc_lsn`) |
+| `stg_payments` | payment_id, order_id, method, amount, status, paid_at (`_cdc_lsn`) |
+| `stg_soap_orders` | order_id, customer_id, status, total_amount, currency, created_at, updated_at (`_batch_ref`) |
+| `stg_file_customers` | customer_id, **email_hash, full_name_hash**, country_code, signup_date, tier (`_batch_ref`) |
+| `stg_file_products` | sku, name, category, price_cents, supplier_code (`_batch_ref`) |
+| `stg_rest_products` | product_id, sku, name, category, currency, price_cents (`_batch_ref`) |
+| `stg_rest_promotions` | promotion_id, product_sku, discount_percent, starts_at, ends_at, description (`_batch_ref`) |
 
 PII mechanics (ADR-008 D1): `email` and `full_name` (OLTP `users` + file
 `customers` feeds) appear in staging **only** as
@@ -232,7 +274,8 @@ wipe.
   `dbt_scd_id`, `customer_id` = user_id, half-open `[valid_from, valid_to)`,
   `is_current` = (`valid_to IS NULL`). email/full_name → `*_hash`
   (`pseudonymized`, same ADR-008 formula). Everything else `none`.
-- `marts.dim_product` — SCD1, natural key `sku`, rest∪file union (REST
+- `marts.dim_product` — SCD1, natural key `sku`; columns: sku, name, category,
+  price_cents, currency, supplier_code, source_feed; rest∪file union (REST
   precedence on the 105-SKU overlap), `price_cents` stays integer cents,
   `source_feed` ∈ {rest, file}. PII `none`.
 - `marts.dim_date` — generated calendar, `date_key` = YYYYMMDD int, day grain
@@ -244,11 +287,12 @@ wipe.
   — documented limitation); SOAP rows carry the Kimball unknown member
   (`customer_sk IS NULL` — SOAP has no identity attribute to resolve). PII
   `none`.
-- `marts.fct_order_items` — line grain `order_item_id`; carries the order's
-  resolved `customer_sk` + `order_date_key`, `product_sku` (dim join is LEFT:
-  ~6.89 % of rows match the catalog by seed design; unmatched = NULL product
-  attributes, never dropped), `line_revenue = quantity * unit_price`. PII
-  `none`.
+- `marts.fct_order_items` — line grain `order_item_id`; columns:
+  order_item_id, source_type, order_id, customer_sk, order_ts, order_date_key,
+  product_sku, product_source_feed, quantity, unit_price, line_revenue. The
+  dim join is LEFT: ~6.89 % of rows match the catalog by seed design;
+  unmatched = NULL product attributes, never dropped.
+  `line_revenue = quantity * unit_price`. PII `none`.
 
 ## Warehouse dq schema (Phase 4 item 10, ADR-011) — the semantic gate's dead-letter
 
@@ -260,7 +304,8 @@ container) at every gate start; the `dq_gate` task runs it downstream of
   `(data_asset, check_digest, source_pk_hash)` among OPEN rows (partial unique
   index `WHERE resolved_at IS NULL`), so re-detection refreshes
   `run_id`/`landed_at` instead of duplicating, and a re-poisoned row after
-  resolution opens a NEW incident. Columns: `suite`, `data_asset`,
+  resolution opens a NEW incident. Columns: `quarantine_id` (serial PK),
+  `suite`, `data_asset`,
   `expectation` (GX type), `check_digest` (rule identity = type + semantic
   kwargs), `column_name`, `row_condition`, `source_pk` (JSONB), `payload`
   (JSONB — the offending row), `failure_reason` (rule + observed values +

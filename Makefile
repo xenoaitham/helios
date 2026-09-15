@@ -10,7 +10,7 @@ ENV_FILE := .env
 export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill chaos-test bench airflow-image run-etl backfill airflow-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill chaos-test bench docs-verify airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -201,6 +201,14 @@ chaos-test: ## Chaos drills (all 7, ~60-90 min) or one: SCENARIO=01|kill_worker|
 # Default label = UTC timestamp (repeated passes never overwrite).
 bench: ## Timed full-load + per-stage rows/sec -> EVIDENCE/bench-*.log (ADR-015); label a pass with BENCH_LABEL=
 	bash scripts/bench/bench.sh $(BENCH_LABEL)
+
+# --- Phase 6 item 15: docs-verify (ADR-016 D3). Mechanical honesty sweep over
+# README + docs/*.md: make targets exist, links/paths/EVIDENCE refs resolve, no
+# credential-shaped literals, resume-bullet numbers anchor to metrics.md.
+# Pure bash+grep; aborts on the first miss; transcript -> EVIDENCE/docs-verify.log.
+# Smoke-test deliberately does NOT grow: this is a separate target, not a check.
+docs-verify: ## Docs honesty sweep: targets, paths, evidence, credentials, resume anchors (ADR-016 D3)
+	@bash scripts/docs-verify.sh 2>&1 | tee EVIDENCE/docs-verify.log; rc=$${PIPESTATUS[0]}; exit $$rc
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

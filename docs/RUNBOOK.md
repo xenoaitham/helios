@@ -1,6 +1,8 @@
 # RUNBOOK — operating HELIOS
 
-Grows each phase (currently Phase 3). Audience: a stranger with the repo and Docker.
+Complete through Phase 6 (project close). Audience: a stranger with the repo and Docker.
+Every claim maps to a `make` target or a file you can check; every number cites its
+`EVIDENCE/` home.
 
 ## 1. Daily driver commands
 
@@ -9,9 +11,10 @@ Grows each phase (currently Phase 3). Audience: a stranger with the repo and Doc
 | `make up` | Start platform; block until every container is healthy (fails loudly with logs otherwise) |
 | `make ps` | Container status |
 | `make logs` | Follow all service logs |
-| `make smoke-test` | Stage 1: infra health incl. SOAP WSDL + auth checks (must pass). Stage 2: E2E ETL — fails loudly until Phase 3 |
+| `make smoke-test` | Stage 1: 26 infra checks incl. SOAP WSDL + auth (must pass). Stage 2: a real orchestrated close + mart parity, SCD2, dead-letter, lineage and metrics assertions — exit 0 when green, loud on any mismatch |
 | `make down` | Stop platform; named data volumes preserved |
-| `make clean` | **DESTRUCTIVE**: stop + delete all data volumes (warehouse re-inits schemas; SOAP store re-seeds on next `make up`) |
+| `make clean` | **DESTRUCTIVE**: stop + delete all data volumes (warehouse re-inits schemas; SOAP store re-seeds on next `make up`) — see §4.2 for what that costs on a used stack |
+| `make docs-verify` | Mechanical docs honesty sweep: make targets, repo paths, EVIDENCE refs, credential-shaped literals, resume-bullet number anchors (ADR-016 D3); transcript → `EVIDENCE/docs-verify.log` |
 
 Phase 1 additions (soap-service):
 
@@ -87,13 +90,16 @@ Phase 3 additions (dbt staging, ADR-008):
 
 | Command | Effect |
 |---|---|
-| `make dbt-build` | Rebuild image + `dbt build`: 9 typed staging models over raw + 81 data tests (one unit) |
-| `make dbt-test` | Rebuild image + `dbt test` standalone (same 81 tests) |
+| `make dbt-build` | Rebuild image + `dbt build`: the full project — 14 table models + the SCD2 snapshot + 144 data tests (a green build prints PASS=160: 1 hook + 1 snapshot + 14 tables + 144 tests) |
+| `make dbt-test` | Rebuild image + `dbt test` standalone (the same 144 tests) |
 | `make dbt-freshness` | `dbt source freshness` — CDC warn 2 min / error 10 min; batch warn 26 h / error 50 h |
 | `make dbt-image` | Build `helios/dbt:latest` only (dbt-core 1.9.11 + dbt-postgres 1.9.1 pinned) |
 
-Notes: models are TABLES rebuilt full each run (~33 s; `stg_order_items` ~4.3M rows
-is the long pole) — CDC current state is `op <> 'd'` over the raw envelopes, and
+Notes: models are TABLES rebuilt full on every run — each `dbt build` re-materializes
+the whole published corpus (~14.1M rows measured; `stg_order_items` ~5.45M rows is the
+long pole; measured walls and honest per-stage bands in `EVIDENCE/metrics.md`: full
+build 65–82 s across three passes on the dev laptop) — CDC current state is `op <> 'd'`
+over the raw envelopes, and
 staging keeps `_cdc_lsn`/`_batch_ref` provenance. PII (`users` and `file_customers`
 email/full_name) becomes `*_hash` = SHA-256(lower(trim(v)) || `PII_HASH_SALT`)
 here; raw keeps cleartext, marts must never receive it (item 8). Rotating
@@ -236,21 +242,107 @@ curl -su "$SOAP_BASIC_AUTH_USER:$SOAP_BASIC_AUTH_PASSWORD" \
 | Source API outage looks "already healed" | The tool-container dependency contract self-heals: compose run starts stopped deps (seconds), blocks on paused deps (~10 min), reconnects partitioned deps — measured 3 ways (ADR-014) | For a REAL outage drill use `make chaos-test SCENARIO=07` (watchdog-enforced partition); operationally, healing is the desired behavior |
 | Sources unreachable but containers healthy | Network partition — in-container healthchecks cannot see it (they run on localhost) | Probe the consumer path: `docker exec helios-airflow-scheduler python3 -c "import urllib.request;urllib.request.urlopen('http://rest-mock:8000/health',timeout=3)"`. Reconnect WITH the alias: `docker network connect --alias rest-mock helios_default helios-rest-mock` (a plain reconnect strips the service alias — DNS stays broken until `docker compose up -d --force-recreate`) |
 
-## 4. Recovery-from-scratch drill (Phase 0)
+## 4. Recovery-from-scratch drill — the honest version (ADR-016 D1)
+
+**What this section is:** the complete walk from a bare clone to a green stack,
+with the expected output at every step. **What honestly happened:** the drill was
+EXECUTED and recorded at Phase 0 (`EVIDENCE/phase-0.md`: `make clean && make up`
+→ all healthy, schemas re-created) when the platform was 8 containers; the
+platform has since grown to 17 and the drill has NOT been re-executed on this
+living stack — deliberately (ADR-016 D1: `make clean` here would destroy the
+measured history the evidence trail is made of). Re-verifying the drill on a
+scratch machine / scratch-volume clone is named future work. Nothing below
+requires this laptop — it is written for a fresh clone.
+
+### 4.0 Prerequisites
+
+- Docker (a normal system daemon OR rootless — the dev host used rootless, see
+  §5; the compose file and Makefile are identical on both) with the compose
+  plugin; `make`, `bash`, `git`, `python3` on the host.
+- Free ports: 5432, 5433, 8080, 29092, 8000, 8001, 5000, 3000, 9091, 3001
+  (all overridable via `.env` `*_PORT`).
+- Disk: ~4 GB images on first pull + several GB of data volumes as the corpora
+  and raw envelope grow.
+
+### 4.1 The walk (fresh clone → green stack)
 
 ```bash
-make clean && make up && make ps   # expect: all healthy, schemas re-created
+git clone <this-repo> && cd <repo>
+make up
 ```
 
-This is the exact drill `EVIDENCE/phase-0.md` records.
+Expected: images pull (first run only); one-shot seeds run before health is
+declared — SOAP seeds ~382k orders (~44 s measured at Phase 1) and OLTP copies
+5.4M rows in one transaction (~3.5 min, `WAIT_TIMEOUT=900` covers it). **On a
+truly fresh volume, `make up` then ends NON-ZERO — by design**: `cdc-sink`
+cannot reach connector RUNNING (a fresh `oltp-db` still has
+`wal_level=replica`), records the registration error and serves 503 until
+`wait-healthy`'s timeout — the loud gate that forces the one-time CDC
+bootstrap below. (Derived from the code path — `cdc-sink/cdc/register.py`
+polls for RUNNING, raises, `health.record_error` → 503 — not re-executed on
+this living stack, ADR-016 D1; the scratch-machine re-verification is the
+named future work.)
+
+```bash
+make cdc-setup                     # wal_level=logical + role + publication (idempotent)
+docker compose restart cdc-sink    # a sink start re-registers the connector (idempotent PUT)
+make up                            # now exits 0 — all 17 helios containers healthy
+```
+
+Expected after the bootstrap: `make ps` shows **17 helios containers** healthy
+(2× Postgres sources, warehouse Postgres, airflow-db/webserver/scheduler,
+Kafka, soap-service, rest-mock, oltp-mutator, cdc-connect, cdc-sink,
+marquez-db/api/web, statsd-exporter, prometheus, grafana), and
+`make cdc-status` shows the connector RUNNING with the initial snapshot
+draining — **~877 s measured** for the 5.5M-event snapshot
+(`EVIDENCE/phase-2-cdc.md`). `cdc-setup` is NOT needed again on a stack whose
+volume already has logical WAL (it is idempotent; when in doubt, run it).
+
+```bash
+make run-etl       # first full close: SOAP full read + dbt + gate
+```
+
+Expected: run_id `etl-<ts>`; the SOAP extractor's FIRST pull is the full
+history (~382k orders, ~2.5 min measured, `EVIDENCE/phase-2-ingest.md`); the
+file/REST legs are near-zero-work on a fresh drop volume; `dbt_build`
+materializes staging+marts (~14M rows; 65–82 s on the dev laptop,
+`EVIDENCE/metrics.md`); `dq_gate` goes green; exit 0. The SCD2 snapshot's
+history BEGINS on this stack at this build — record your own
+`min(dbt_valid_from)`; from then on it must never move (§4b snapshot rules).
+
+```bash
+make smoke-test    # expect: exit 0 — Stage 1 26/26 + Stage 2 assertions
+```
+
+You now have the full platform: CDC tailing the live mutator, batch feeds on
+demand (`make ingest-*`), the nightly `daily_close` armed for 05:00 UTC
+(`catchup=False`), Marquez at :3000 (run `make run-etl` once more to populate
+its graph), Grafana at :3001, and `make dq-status` reporting 0 incidents.
+
+### 4.2 What `make clean` costs on a USED stack (why the drill is documented, not re-run here)
+
+| Destroyed | Consequence |
+|---|---|
+| OLTP + SOAP source volumes | Full reseed (~3.5 min + ~44 s) — reproducible, but the "living corpus" continuity ends |
+| Warehouse volume (raw/staging/marts) | Re-derived by the pipeline — but the SCD2 snapshot history resets (`min(dbt_valid_from)` moves to the new first build) and the 8 RESOLVED `dq_quarantine` incidents (the chaos war-story artifacts) are gone forever |
+| CDC slot + connector offsets | `make cdc-setup` + a fresh ~877 s snapshot re-drain |
+| Marquez store | Re-derived on the next build+close (lineage is derived state) |
+| Prometheus TSDB / Grafana state | NOT re-derivable — metrics history is gone by design (ADR-013 D4) |
+| Chaos-06 residue (`users.loyalty_tier`, NULL) | The live exhibit of the additive-drift gap (ADR-014) is wiped with the source volume |
+
+Decision + alternatives: ADR-016 D1. On a fresh clone none of this applies —
+§4.1 is exactly what `make clean && make up` gives you, minus nothing.
 
 ## 4b. CDC operations (Phase 2, ADR-005)
 
 The capture path is `oltp-db (wal_level=logical) → cdc-connect (Debezium, pgoutput)
 → Kafka topics helios.public.<table> → cdc-sink → warehouse raw.cdc_<table>`.
 The sink registers the connector idempotently on every start, so a plain
-`make up` brings the whole path up; `make cdc-setup` is only needed when the
-role/publication don't exist yet (fresh volume) or `wal_level` was reset.
+`make up` brings the whole path up on a stack that has been bootstrapped once;
+on a never-bootstrapped fresh volume the sink loudly stays unhealthy until the
+§4.1 bootstrap (`make cdc-setup` + `docker compose restart cdc-sink`) — that
+expected non-zero is the drill, not a defect. `make cdc-setup` is otherwise
+only needed when the role/publication don't exist yet or `wal_level` was reset.
 
 | Task | Command | Notes |
 |---|---|---|
@@ -274,8 +366,11 @@ the same state without dupes. `make cdc-verify` stage [4] proves it live.
 
 Schema drift: adding a column to an oltp table lands in the Debezium envelopes
 automatically (JSONB `after` in raw); dropping/renaming needs the publication
-member list refreshed (`make cdc-setup` re-adds the four known tables) and is a
-Phase-5 chaos scenario.
+member list refreshed (`make cdc-setup` re-adds the four known tables). Both
+shapes are drilled and measured: `make chaos-test SCENARIO=06` (ADR-014) —
+additive drift is invisible end-to-end (the live probe column
+`users.loyalty_tier`, all-NULL, is still in the source as the exhibit); a
+rename breaks the mutator loudly while the pipeline stays unaware.
 
 ### Snapshot protection (Phase 3 item 8, ADR-009)
 
@@ -376,6 +471,7 @@ build` command `make dbt-build` and the DAG task have always used).
 | Look at the graph | http://localhost:3000 | pick a dataset → lineage graph; the **column-level** page renders per-column edges (e.g. `dim_customer.customer_sk ─→ fct_orders.customer_sk`) |
 | Wipe the lineage store | `make down -v` deletes it (or full `make clean`) | lineage is DERIVED state: one `make dbt-build` + `make run-etl` re-derives the graph; no source data touched |
 | Backend outage | `docker compose stop marquez-api` | the pipeline is non-fatal by contract (ADR-012 D6): dbt build and daily_close stay green (emission retries add ~9 s/event ≈ up to ~12 min to dbt_build under a total outage — inside the task's 20-min timeout); events resume on `docker compose start marquez-api` + the next build/run. Emissions attempted during an outage are dropped by the client (no queueing/backfill). |
+| Slow lineage-verify / smoke lineage probes after weeks of runs | Marquez `/jobs` grows monotonically with run history (measured 2.6 MB / ~16 s server-side on 2026-09-15 after 3 days of history; `VACUUM ANALYZE` does not move it) | Nothing is broken: the client timeouts in `scripts/lineage-verify.sh` and the smoke lineage block were re-timed 15 s → 45 s for exactly this (same checks, same count — git-proven zero smoke growth). A pruning/rotation policy for the Marquez store is named future work (ADR-016 D2); the store is derived state and `make down -v` re-derivation still applies |
 
 What the graph shows (the emit boundary, ADR-012 D2): dbt's **raw sources →
 staging → marts** with column-level lineage where the SQL parser resolves it;

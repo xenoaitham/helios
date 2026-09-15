@@ -18,23 +18,29 @@ measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 | 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done — [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
 | 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ✅ done — [EVIDENCE/phase-3.md](EVIDENCE/phase-3.md) roll-up |
 | 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage ([phase-4-lineage](EVIDENCE/phase-4-lineage.md)), Prometheus + Grafana ([phase-4-metrics](EVIDENCE/phase-4-metrics.md)) | ✅ done |
-| 5 | Chaos & performance: `make chaos-test`, `make bench` | ⬜ |
-| 6 | Package: RUNBOOK, data dictionary, interview defense pack | ⬜ |
+| 5 | Chaos & performance: [chaos 7/7](EVIDENCE/phase-5-chaos.md) (ADR-014), [bench → metrics.md](EVIDENCE/metrics.md) (ADR-015) | ✅ done |
+| 6 | Package: [RUNBOOK](docs/RUNBOOK.md) + drill (ADR-016), [DATA_DICTIONARY](docs/DATA_DICTIONARY.md), [INTERVIEW_DEFENSE](docs/INTERVIEW_DEFENSE.md) (54 Q&A, ESB mapping, AliCloud notes) | ✅ done — project CLOSED 2026-09-15 |
 
 Current state: see [STATE.md](STATE.md) (always current) and [BACKLOG.md](BACKLOG.md).
 
-## Quickstart (Phase 0 baseline)
+## Quickstart
 
 ```bash
 make up          # start + wait until every container is healthy
+                 # (fresh volume: ends non-zero on cdc-sink by design until the one-time
+                 #  `make cdc-setup && docker compose restart cdc-sink`, then `make up` again)
 make ps          # all containers healthy
-make smoke-test  # Phase 0: infra checks PASS, E2E E2E checks fail LOUDLY by design (exit 1)
+make smoke-test  # Stage 1: 26 infra checks + Stage 2: a real orchestrated close + parity/SCD2/dead-letter/lineage/metrics assertions (exit 0)
 make down        # stop (data volumes preserved)
 ```
 
-Measured on the dev machine (12 vCPU, rootless Docker, see `EVIDENCE/phase-0.md`):
-cold `make up` after images are present ≈ 80 s. First run additionally downloads
-images once (~3.2 GB: Airflow 2.14 GB + Kafka 628 MB + Postgres 420 MB).
+First run creates `.env` from `.env.example` (local-dev defaults) automatically, pulls
+the images once (sizes visible via `docker images` — Airflow is the big one), and seeds
+the sources (SOAP ~382k orders ~44 s; OLTP 5.4M rows ~3.5 min — `EVIDENCE/phase-1-*.md`).
+The full fresh-clone walk — including the one-time CDC bootstrap and first close — is the
+[recover-from-scratch drill](docs/RUNBOOK.md#4-recovery-from-scratch-drill--the-honest-version-adr-016-d1)
+in the RUNBOOK (proven at Phase-0 code state; re-verification on a scratch
+machine is named future work, ADR-016 D1).
 
 First run creates `.env` from `.env.example` (local-dev defaults) automatically.
 
@@ -122,7 +128,8 @@ restored DB),
 FAILED Debezium task does not self-recover — the scripted recovery restarts
 the task via the Connect API**; retained WAL peak/drain measured),
 `poison_cdc` / `poison_csv` (the Session-9 injections scripted: gate red →
-dead-letter → **HeliosAirflowTaskFailure fires, 70–80 s measured** → source
+dead-letter → **HeliosAirflowTaskFailure fires, 69–80 s measured across three
+executions; final-suite transcripts 69/73 s** → source
 fix → green close → `dq-replay` resolves; row-level targeting re-proven),
 `schema_drift` (ADD COLUMN proven invisible end-to-end — the honest gap —
 plus a guarded rename probe: the mutator fails loudly, the pipeline would
@@ -135,59 +142,93 @@ Destructive by design, re-runnable (ADR-014 D7): quarantine only ever grows
 by RESOLVED audit rows; `dq.dq_quarantine` ends 0 OPEN. Smoke-test is the
 green-state guard and does not grow.
 
+### Bench (Phase 5, ADR-015)
+
+`make bench` times the REAL pipeline per stage — every rate is a measured row
+count ÷ a measured wall, traceable to a transcript in `EVIDENCE/bench-*.log`,
+rolled up with date + hardware in [EVIDENCE/metrics.md](EVIDENCE/metrics.md).
+Three complete 6/6-leg passes (incl. the CRITIC's independent re-run); the
+honest headline BANDS (never a single run; this laptop, not production):
+
+| Stage | Band (three passes) |
+|---|---|
+| dbt full re-materialization (14 models + snapshot — the platform's real full load) | **14,095,849–14,136,532 rows in 65–82 s = 172k–217k rows/s** (the ~5.45M-row items table: ~300–334k staged) |
+| SOAP full walk (READ; landed=0 by idempotence) | 382,179 rows @ 2,637–2,773 rows/s |
+| CDC applied drain (live mutator, lag=0) | 7.4–7.7 events/s — the mutator's pace, not a ceiling (≈6.3k events/s measured at snapshot drain) |
+| GE semantic gate scan (6 suites) | ~8.5M rows @ 608k–766k rows/s |
+| Orchestrated `daily_close` end-to-end | 150.7–163.4 s server-side, 5/5 tasks green (dbt_build 69–82 s, dq_gate 16–17 s) |
+
 ## Architecture (target — components annotated with the phase that delivers them)
 
 ```mermaid
 flowchart LR
     subgraph SRC["Legacy sources"]
-        SOAP["soap-service (Ph.1)<br/>OrderManagement SOAP 1.1<br/>spyne - basic auth - frozen WSDL contract"]
-        FF["file-drop (Ph.1)<br/>nightly CSV feeds<br/>dupes - ragged rows - bad encoding"]
-        REST["rest-mock (Ph.1)<br/>Pricing and Promotions API<br/>pagination - rate limits - flaky 500s"]
-        OLTP[("oltp Postgres (Ph.1)<br/>users - orders - items - payments<br/>5M+ rows - continuous mutations")]
+        OLTP[("oltp-db :5432<br/>5M+ rows, wal_level=logical")]
+        MUT["oltp-mutator<br/>continuous churn"]
+        SOAP["soap-service :8000<br/>SOAP 1.1, basic auth<br/>frozen WSDL, 382,179 orders"]
+        REST["rest-mock :8001<br/>cursor paging, 429s, flaky 500s"]
+        FF["file-drop<br/>nightly dirty CSVs (volume)"]
+        MUT --> OLTP
     end
 
-    subgraph MOVE["Ingestion and movement (Ph.2)"]
-        DEB["cdc-connect: Debezium<br/>Postgres connector (pgoutput)<br/>logical slot helios_cdc_slot"]
-        KAFKA[("Kafka KRaft<br/>single broker<br/>topics helios.public.*")]
-        SINK["cdc-sink (Ph.2)<br/>lsn-guarded upserts<br/>idempotent by (lsn, pk)"]
-        ING["ingest lib<br/>watermarks - retry/backoff"]
-        DEB --> KAFKA --> SINK --> RAW
+    subgraph MOVE["Ingestion and movement"]
+        DEB["cdc-connect<br/>Debezium, logical slot"]
+        KAFKA[("kafka :29092<br/>KRaft single broker")]
+        SINK["cdc-sink<br/>lsn-guarded upserts"]
+        TOOLS["one-shot tool containers<br/>ingest - dbt build - dq gate<br/>watermarks, hash ledger, GE suites"]
+        DEB --> KAFKA --> SINK
     end
 
-    subgraph WH["Warehouse Postgres"]
+    subgraph WH["Warehouse"]
+        WDB[("warehouse-db :5433")]
         RAW[("raw schema")]
-        STG[("staging schema<br/>PII hash/mask")]
-        MART[("marts schema<br/>star schema")]
+        STG[("staging schema<br/>PII hashed here")]
+        MART[("marts schema<br/>star + SCD2 snapshot")]
+        RAW --> STG --> MART
     end
 
-    ORCH["Airflow<br/>DAGs - SLA - retries (Ph.3)"]
-    DBT["dbt<br/>staging to marts - SCD2 (Ph.3)<br/>dbt-ol wrapper (Ph.4, ADR-012)"]
-    GE["Great Expectations gate<br/>semantic suites over frozen<br/>staging+marts (Ph.4, ADR-011)"]
-    DQ[("dq.dq_quarantine<br/>dead-letter + replay")]
-    LIN["Marquez (Ph.4, ADR-012)<br/>api :5000 - web UI :3000<br/>own Postgres; table+column lineage<br/>raw sources → staging → marts"]
-    SD["statsd-exporter (Ph.4, ADR-013)<br/>static IP on metrics-net<br/>mapping as code"]
-    PROM["Prometheus (Ph.4, ADR-013)<br/>:9091 - scrape + alert rules<br/>TSDB on named volume"]
-    GRAF["Grafana (Ph.4, ADR-013)<br/>:3001 - dashboards as code<br/>read-only SQL pulls"]
+    subgraph ORCH["Orchestration"]
+        AW["airflow-webserver :8080"]
+        AS["airflow-scheduler<br/>daily_close 05:00 UTC<br/>rootless-socket one-shots"]
+        ADB[("airflow-db")]
+        AS -.-> ADB
+        AW -.-> ADB
+    end
 
-    SOAP --> ING
-    FF --> ING
-    REST --> ING
-    ING --> RAW
-    OLTP --> DEB --> KAFKA --> RAW
-    ORCH --> ING
-    ORCH --> DEB
-    RAW --> DBT --> STG --> MART
-    DBT --> GE
-    GE --> DQ
-    ORCH --> GE
-    ORCH -.->|task/run events| LIN
-    DBT -.->|dbt-ol: dataset + column-lineage events| LIN
-    ORCH -.->|StatsD UDP: task/dagrun metrics| SD
-    SD --> PROM
-    PROM --> GRAF
-    GRAF -.->|read-only SQL: row counts + task durations| WH
-    GRAF -.->|pull| PROM
+    subgraph LIN["Lineage - marquez x3"]
+        MAPI["marquez-api :5000"]
+        MDB[("marquez-db")]
+        MWEB["marquez-web :3000"]
+        MAPI --> MDB
+        MWEB --> MAPI
+    end
+
+    subgraph OBS["Observability"]
+        SDE["statsd-exporter<br/>static IP 172.31.0.9"]
+        PROM["prometheus :9091<br/>3 alert rules"]
+        GRAF["grafana :3001<br/>dashboards as code"]
+        SDE --> PROM --> GRAF
+    end
+
+    OLTP --> DEB
+    SOAP --> TOOLS
+    FF --> TOOLS
+    REST --> TOOLS
+    TOOLS --> RAW
+    SINK --> RAW
+    AS -->|"docker compose run one-shots"| TOOLS
+    TOOLS --> WDB
+    AS -.->|"OpenLineage events"| MAPI
+    AS -.->|"StatsD UDP :9125"| SDE
+    GRAF -.->|"read-only SQL pulls"| WDB
 ```
+
+The 17 long-running containers this diagram maps to: `oltp-db`, `oltp-mutator`,
+`soap-service`, `rest-mock`, `kafka`, `cdc-connect`, `cdc-sink`, `warehouse-db`,
+`airflow-webserver`, `airflow-scheduler`, `airflow-db`, `marquez-db`,
+`marquez-api`, `marquez-web`, `statsd-exporter`, `prometheus`, `grafana` — all
+healthy after one `make up` (the batch tools are one-shot containers, run by
+`make` or by the scheduler, never long-lived).
 
 The shipped reality always outruns this static file — [STATE.md](STATE.md) is the
 current state and each phase's CRITIC review checks the repo against the diagram.
@@ -273,9 +314,10 @@ oltp/                  (Ph.1 ✅) OLTP schema + 5.4M-row COPY seeder + mutation 
 ingest/                (Ph.2 ✅) batch extractors: watermark cursors, Retry-After
                        backoff, content-hash idempotent raw landing, quarantine (ADR-006/007)
 dags/                  (Ph.3) Airflow DAGs
-dbt/                   (Ph.3 ✅ staging) dbt project: 9 typed staging models over raw,
-                       PII hashing (SHA-256 + env salt), freshness + 81 tests (ADR-008)
-dq/                    (Ph.4) Great Expectations suites + quarantine
+dbt/                   (Ph.3 ✅) dbt project: 14 table models (staging + marts) + the SCD2
+                       snapshot, PII hashing (SHA-256 + env salt), 144 tests (ADR-008/009)
+dq/                    (Ph.4 ✅) Great Expectations suites + dead-letter quarantine
+                       + replay (32 tests, ADR-011)
 observability/         (Ph.4 ✅) statsd-exporter mapping, Prometheus scrape+rules,
                        Grafana datasources+dashboard — all as code (ADR-013)
 DECISIONS/             ADRs — why the platform looks like this
