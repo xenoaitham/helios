@@ -1,0 +1,16 @@
+# ADR-008 D5: everything from the environment via env_var() — zero literals.
+# host/port defaults are in-compose topology (warehouse-db:5432), not secrets;
+# user/password/dbname have NO defaults — they must come from the environment
+# (compose passes WAREHOUSE_POSTGRES_* from .env).
+helios:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_POSTGRES_HOST', 'warehouse-db') }}"
+      port: "{{ env_var('WAREHOUSE_POSTGRES_PORT', '5432') | int }}"
+      user: "{{ env_var('WAREHOUSE_POSTGRES_USER') }}"
+      password: "{{ env_var('WAREHOUSE_POSTGRES_PASSWORD') }}"
+      dbname: "{{ env_var('WAREHOUSE_POSTGRES_DB') }}"
+      schema: staging
+      threads: 8

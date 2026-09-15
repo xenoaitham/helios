@@ -1,0 +1,23 @@
+# HELIOS dbt project (ADR-008): typed staging models over the raw zone.
+name: helios
+version: 1.0.0
+config-version: 2
+profile: helios
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+require-dbt-version: [">=1.9.0", "<1.10.0"]
+
+models:
+  helios:
+    +materialized: table
+
+# Run-scoped setup, idempotent by construction (ADR-008):
+#  - pgcrypto powers pii_hash(); the warehouse volume predates Phase 3, so the
+#    bootstrap init SQL could not carry it — the hook makes `make dbt-build`
+#    self-sufficient and rerunnable.
+on-run-start:
+  - "create extension if not exists pgcrypto"

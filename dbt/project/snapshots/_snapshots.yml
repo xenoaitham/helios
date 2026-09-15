@@ -1,0 +1,33 @@
+version: 2
+
+# Snapshot contract (ADR-009 D1/D7): hashed-attribute columns only, plus dbt's
+# SCD metadata. Format tests guard the PII contract at the state layer too —
+# the snapshot is as consumer-sensitive as any mart.
+
+snapshots:
+  - name: customers_snapshot
+    description: >
+      SCD2 state store for dim_customer (check strategy over
+      [email_hash, full_name_hash, country_code, is_active]). PERSISTENT:
+      history begins at first run; never full-refresh it.
+    columns:
+      - name: user_id
+        data_tests: [not_null]
+      - name: email_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: full_name_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: country_code
+        data_tests: [not_null]
+      - name: is_active
+        data_tests: [not_null]
+      - name: dbt_scd_id
+        data_tests: [unique, not_null]
+      - name: dbt_valid_from
+        data_tests: [not_null]

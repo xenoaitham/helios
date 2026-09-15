@@ -1,0 +1,716 @@
+# HELIOS — containerized enterprise data platform
+#
+#   oltp-db        Postgres 16  — modern OLTP source (schema + seed data arrive in Phase 1)
+#   warehouse-db   Postgres 16  — warehouse with raw/staging/marts schemas (init script below)
+#   airflow-db     Postgres 16  — Airflow metadata (infra only)
+#   kafka          KRaft single broker — CDC transport (Debezium arrives in Phase 2)
+#   airflow-init   one-shot: db migrate + admin user
+#   airflow-webserver / airflow-scheduler — orchestration. DAGs (Phase 3 item 9,
+#                  ADR-010): per-source ingest DAGs + master daily_close; tasks
+#                  invoke the SAME one-shot tool containers make runs through the
+#                  host's rootless docker socket (scheduler only; uid-matched).
+#   soap-service   legacy OrderManagement SOAP 1.1 source (Phase 1; ADR-001)
+#                  SQLite store on named volume soap_data; WSDL at /?wsdl (basic auth)
+#   oltp-seed      one-shot: schema + 5M+ row COPY seed of the OLTP source (ADR-002)
+#   oltp-mutator   continuous updates+deletes on the OLTP source (CDC fuel, ADR-002)
+#   rest-mock      Pricing & Promotions mock API: paging, 429s, flaky 500s (ADR-003)
+#   filedrop-tools one-shot tool: nightly CSV feeds with dirt into a drop volume (ADR-004)
+#   cdc-connect    Kafka Connect + Debezium Postgres connector — reads oltp WAL (ADR-005)
+#   cdc-sink       Python consumer: lsn-guarded (lsn, pk) upserts into warehouse raw (ADR-005)
+#   ingest         one-shot batch extractors: SOAP/file/REST -> raw with watermark
+#                  cursors + content-hash idempotency + quarantine (ADR-006/007)
+#   dbt            one-shot dbt build/test/freshness: raw -> typed staging with
+#                  PII hashing + a shared per-run CDC cut (ADR-008). Runs as
+#                  dbt-ol (ADR-012 D4): the same command wraps dbt with
+#                  OpenLineage event emission (run/dataset/column lineage).
+#   dq             one-shot Great Expectations gate over frozen staging/marts,
+#                  dead-letter quarantine in dq.dq_quarantine + replay
+#                  (Phase 4; ADR-011)
+#   marquez-db     Postgres 16 — Marquez's DEDICATED lineage store; derived,
+#                  re-derivable state (wipe story: ADR-012 D5)
+#   marquez-api    Marquez 0.51.1 — OpenLineage backend: lineage REST :5000,
+#                  Dropwizard admin :5001 (healthcheck); own schema migrations
+#                  on boot; custom config takes db creds from env (ADR-012 D5)
+#   marquez-web    Marquez UI :3000 — graph + column-level lineage views
+#   statsd-exporter prom/statsd-exporter — the StatsD→Prometheus bridge for
+#                  Airflow 2.10.5's metrics (UDP :9125 in-net, /metrics :9102;
+#                  mapping as code in observability/) — ADR-013 D2/D4
+#   prometheus     Prometheus 3 — scrapes the metrics stack, evaluates alert
+#                  rules (observability/prometheus/), TSDB on a named volume;
+#                  host :9091 (:9090 taken by another local project)
+#   grafana        Grafana 13 — dashboards-as-code (observability/grafana/),
+#                  read-only pulls of Prometheus + warehouse-db + airflow-db;
+#                  host :3001 (:3000 taken by marquez-web)
+#
+# All credentials come from .env (see .env.example).
+
+name: helios
+
+x-airflow-common: &airflow-common
+  # ADR-010 D1: extended image = apache/airflow:2.10.5-python3.11 + the host's
+  # docker compose plugin (staged by `make airflow-image`), so DAG tasks run the
+  # SAME one-shot tool containers make runs. Not a new service — an extension.
+  build: ./airflow
+  image: helios/airflow:2.10.5
+  # Rootless-docker socket access (ADR-010 D1): inside the daemon's user
+  # namespace, container uid 0 IS the host user that runs the rootless daemon
+  # (potato) — the socket's owner. Any nonzero container uid maps into the
+  # subuid range (potato:100000:65536) and matches neither owner nor group.
+  # So the airflow services run as userns-root == that same host user: no
+  # privilege beyond what the daemon user already holds.
+  user: "0:0"
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-airflow_local_dev}@airflow-db:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-helios-local-dev-secret}
+    # ADR-012 D3: OpenLineage events -> Marquez. The provider ships in the
+    # 2.10.5 base image (constraint-pinned 2.0.0 — zero image delta); the
+    # presence of a transport config is the ON switch (probed live:
+    # is_disabled()==True without one; there is no __ENABLED key on 2.10).
+    # In-compose topology, like CDC_CONNECT_URL; emission is soft-fail
+    # (listener try/except + forked, 10s timeout) — never on the write path.
+    AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type": "http", "url": "http://marquez-api:5000", "endpoint": "api/v1/lineage"}'
+    AIRFLOW__OPENLINEAGE__NAMESPACE: helios
+    # ADR-013 D3: pipeline metrics via StatsD -> statsd-exporter (UDP,
+    # fire-and-forget — dropped-not-queued; observability is never on the
+    # write path, D7). The client ships in the 2.10.5 base image (probed:
+    # `import statsd` succeeds) — env-only wiring, zero image delta. Plain
+    # statsd carries NO tags (statsd_influxdb_enabled stays False): the
+    # name-encoded legacy metrics are the wire surface (ADR-013 D2).
+    AIRFLOW__METRICS__STATSD_ON: "True"
+    # ADR-013 D7 (amended 2026-09-13): the statsd pip client resolves the host
+    # ONCE per process (getaddrinfo -> cached numeric addr, statsd/client/udp.py)
+    # — an exporter IP change would silently orphan every long-lived airflow
+    # process's metrics (dropped-not-queued). The exporter therefore holds a
+    # STATIC IP on the dedicated metrics-net and STATSD_HOST targets that
+    # address directly: the cached destination survives any exporter restart.
+    AIRFLOW__METRICS__STATSD_HOST: 172.31.0.9
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow
+    # Absolute host path of the repo (exported by the Makefile / scripts). DAG
+    # tasks `cd` here and run docker compose from it; the scheduler mounts the
+    # repo read-only at THIS EXACT path so in-scheduler compose resolves
+    # relative bind-mount sources to the same host paths compose-on-host does
+    # (bind-source parity, ADR-010 D1).
+    HELIOS_PROJECT_DIR: ${HELIOS_PROJECT_DIR:?exported by the Makefile; export it before running docker compose by hand}
+  # ADR-013 D7 (amended): airflow services join metrics-net so their StatsD
+  # datagrams reach the exporter's static address (see STATSD_HOST above).
+  networks:
+    - default
+    - metrics-net
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+
+services:
+  oltp-db:
+    image: postgres:16-alpine
+    container_name: helios-oltp-db
+    # ADR-005: logical decoding for Debezium CDC. Command override only — the
+    # data volume is NOT rebuilt (wal_level is a startup parameter). max_wal_senders/
+    # max_replication_slots defaults (10/10) suffice for the single CDC slot.
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+    ports:
+      - "${OLTP_PORT:-5432}:5432"
+    volumes:
+      - oltp_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OLTP_POSTGRES_USER:-oltp} -d ${OLTP_POSTGRES_DB:-oltp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  warehouse-db:
+    image: postgres:16-alpine
+    container_name: helios-warehouse-db
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+    ports:
+      - "${WAREHOUSE_PORT:-5433}:5432"
+    volumes:
+      - warehouse_data:/var/lib/postgresql/data
+      # Creates raw/staging/marts on FIRST init of an empty volume only.
+      - ./infra/warehouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WAREHOUSE_POSTGRES_USER:-warehouse} -d ${WAREHOUSE_POSTGRES_DB:-warehouse}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  soap-service:
+    build: ./soap-service
+    image: helios/soap-service:latest
+    container_name: helios-soap-service
+    environment:
+      SOAP_DB_PATH: /data/orders.db
+      SOAP_BASIC_AUTH_USER: ${SOAP_BASIC_AUTH_USER:-soap_local_dev}
+      SOAP_BASIC_AUTH_PASSWORD: ${SOAP_BASIC_AUTH_PASSWORD:-soap_local_dev}
+    ports:
+      - "${SOAP_PORT:-8000}:8000"
+    volumes:
+      - soap_data:/data
+      # The frozen WSDL contract lives in the repo; `make contract-freeze` writes
+      # through this bind mount, and pytest reads the same file from /app/contract.
+      - ./soap-service/contract:/app/contract
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 150s
+    restart: unless-stopped
+
+  # Phase 1 source (ADR-002): one-shot seeder applying schema + 5M+ rows via a
+  # single COPY transaction (--if-empty no-ops when already seeded). Its image
+  # also powers oltp-mutator; tests run in it via `make test-oltp`.
+  oltp-seed:
+    build: ./oltp
+    image: helios/oltp-tools:latest
+    container_name: helios-oltp-seed
+    environment:
+      OLTP_PGHOST: oltp-db
+      OLTP_PGPORT: "5432"
+      OLTP_POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      OLTP_POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      OLTP_POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+      OLTP_SEED_USERS: ${OLTP_SEED_USERS:-50000}
+      OLTP_SEED_ORDERS: ${OLTP_SEED_ORDERS:-500000}
+    command: python -m oltp.seed --if-empty --report
+    depends_on:
+      oltp-db:
+        condition: service_healthy
+    restart: "no"
+
+  # Continuous updates+deletes so CDC (Phase 2) sees real WAL churn; liveness
+  # on GET /health (:8081) feeds the container healthcheck.
+  oltp-mutator:
+    build: ./oltp
+    image: helios/oltp-tools:latest
+    container_name: helios-oltp-mutator
+    environment:
+      OLTP_PGHOST: oltp-db
+      OLTP_PGPORT: "5432"
+      OLTP_POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      OLTP_POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      OLTP_POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+      OLTP_MUTATE_TICK_SECONDS: ${OLTP_MUTATE_TICK_SECONDS:-2}
+    command: python -m oltp.mutate
+    depends_on:
+      oltp-db:
+        condition: service_healthy
+      oltp-seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  # Phase 1 source (ADR-003): Pricing & Promotions mock API — cursor pagination,
+  # token-bucket 429s, deterministic flaky 500s. In-memory catalog, no volume.
+  rest-mock:
+    build: ./rest-mock
+    image: helios/rest-mock:latest
+    container_name: helios-rest-mock
+    environment:
+      REST_MOCK_FLAKE_PERCENT: ${REST_MOCK_FLAKE_PERCENT:-5}
+      REST_MOCK_FLAKE_SEED: ${REST_MOCK_FLAKE_SEED:-42}
+      REST_MOCK_RATE_CAPACITY: ${REST_MOCK_RATE_CAPACITY:-30}
+      REST_MOCK_RATE_REFILL_PER_SEC: ${REST_MOCK_RATE_REFILL_PER_SEC:-10}
+    ports:
+      - "${REST_MOCK_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  # Phase 1 source (ADR-004): nightly CSV feed generator writing into an SFTP-style
+  # drop volume. One-shot TOOL, not part of `make up` (profiles gate it); invoked
+  # via make drop-generate / drop-generate-late / drop-ls / test-drop.
+  filedrop-tools:
+    build: ./file-drop
+    image: helios/filedrop-tools:latest
+    container_name: helios-filedrop-tools
+    volumes:
+      - filedrop_data:/data/drop
+    command: python -m filedrop.generate --report
+    restart: "no"
+    profiles: ["tools"]
+
+  # Phase 2 movement (ADR-005): Kafka Connect + Debezium Postgres connector.
+  # Captures public.{users,orders,order_items,payments} from the oltp WAL via
+  # pgoutput (slot helios_cdc_slot, publication helios_publication) into topics
+  # helios.public.<table>. Connector config is registered idempotently by cdc-sink.
+  cdc-connect:
+    image: quay.io/debezium/connect:3.1.3.Final
+    container_name: helios-cdc-connect
+    ports:
+      - "${CDC_CONNECT_PORT:-8083}:8083"
+    environment:
+      # In-network listener; HOST listener (localhost:29092) is for host tooling only.
+      # Env names follow the Debezium image contract (its entrypoint translates
+      # CONNECT_X_Y env vars into worker property x.y; short names are its own).
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: helios-connect-cluster
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: ${KAFKA_CONNECT_HEAP_OPTS:--Xms256M -Xmx768M}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "printf 'GET /connectors HTTP/1.0\\r\\n\\r\\n' >/dev/tcp/localhost/8083"]
+      interval: 10s
+      timeout: 10s
+      retries: 24
+      start_period: 60s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      oltp-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Phase 2 movement (ADR-005): the raw-zone sink. Python consumer applying
+  # Debezium events into warehouse raw.cdc_users/orders/order_items/payments with
+  # lsn-guarded upserts (idempotent by (lsn, pk)). Registers the connector on
+  # startup, ensures the raw DDL, commits offsets only after a batch is applied.
+  cdc-sink:
+    build: ./cdc-sink
+    image: helios/cdc-sink:latest
+    container_name: helios-cdc-sink
+    environment:
+      CDC_KAFKA_BOOTSTRAP: kafka:9092
+      CDC_GROUP_ID: helios-cdc-sink
+      CDC_TOPIC_PREFIX: helios
+      CDC_CONNECT_URL: http://cdc-connect:8083
+      CDC_HEALTH_PORT: "8081"
+      CDC_DB_USER: ${CDC_DB_USER:-helios_cdc}
+      CDC_DB_PASSWORD: ${CDC_DB_PASSWORD:-cdc_local_dev}
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      # verify.py needs source-side reads/writes for the DoD checks (make cdc-verify).
+      OLTP_POSTGRES_USER: ${OLTP_POSTGRES_USER:-oltp}
+      OLTP_POSTGRES_PASSWORD: ${OLTP_POSTGRES_PASSWORD:-oltp_local_dev}
+      OLTP_POSTGRES_DB: ${OLTP_POSTGRES_DB:-oltp}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      warehouse-db:
+        condition: service_healthy
+      cdc-connect:
+        condition: service_healthy
+    restart: unless-stopped
+
+  airflow-db:
+    image: postgres:16-alpine
+    container_name: helios-airflow-db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_local_dev}
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: helios-kafka
+    ports:
+      - "${KAFKA_HOST_PORT:-29092}:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # PLAINTEXT: in-network (Debezium, sinks)   HOST: host tooling via localhost
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:${KAFKA_HOST_PORT:-29092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xmx512M -Xms256M
+      CLUSTER_ID: 5Yr8sJhQvCgtqEBecjUKw
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+    restart: unless-stopped
+
+  # Phase 2 movement (ADR-006/007): one-shot batch extractors — SOAP windowed
+  # GetOrders, file-drop CSV feeds with quarantine, REST cursor walks — landing
+  # into per-source raw tables with content-hash-guarded upserts (idempotent:
+  # crash-replay leaves no dupes). A TOOL like filedrop-tools (profiles gate it
+  # out of `make up`); Airflow orchestrates these runs in Phase 3.
+  ingest:
+    build: ./ingest
+    image: helios/ingest:latest
+    container_name: helios-ingest
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      INGEST_SOAP_BASE_URL: http://soap-service:8000
+      SOAP_BASIC_AUTH_USER: ${SOAP_BASIC_AUTH_USER:-soap_local_dev}
+      SOAP_BASIC_AUTH_PASSWORD: ${SOAP_BASIC_AUTH_PASSWORD:-soap_local_dev}
+      INGEST_REST_BASE_URL: http://rest-mock:8000
+      INGEST_FILEDROP_DIR: /data/drop
+    volumes:
+      # read-only: the extractor never writes into the source's drop zone
+      # (rejects go to the raw.ingest_quarantine table — ADR-007).
+      - filedrop_data:/data/drop:ro
+    command: python -m ingest.run --source all
+    depends_on:
+      warehouse-db:
+        condition: service_healthy
+      soap-service:
+        condition: service_healthy
+      rest-mock:
+        condition: service_healthy
+
+  # Phase 3 warehouse (ADR-008): dbt staging models over the raw zone. One-shot
+  # TOOL like ingest (profiles gate it out of `make up`); Airflow orchestrates
+  # dbt in item 9. All credentials via env — profiles.yml uses env_var() only.
+  # Code is baked into the image: `docker compose build dbt` after any change
+  # (the make dbt-* targets depend on dbt-image for exactly this).
+  dbt:
+    build: ./dbt
+    image: helios/dbt:latest
+    container_name: helios-dbt
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      PII_HASH_SALT: ${PII_HASH_SALT:-helios_local_dev_pii_salt}
+      # ADR-012 D4: dbt runs wrapped by dbt-ol (the image ENTRYPOINT), which
+      # emits OpenLineage run/dataset/column-lineage events to Marquez. The
+      # wrapper returns dbt's OWN exit code and swallows emission failures
+      # (ADR-012 D6), so there is deliberately NO depends_on marquez-api:
+      # a dbt run must stay green with Marquez stopped.
+      OPENLINEAGE_URL: http://marquez-api:5000
+      OPENLINEAGE_NAMESPACE: helios
+    depends_on:
+      warehouse-db:
+        condition: service_healthy
+
+  # Phase 4 trust (ADR-011): Great Expectations gate over the FROZEN staging/
+  # marts relations + dead-letter quarantine + replay. One-shot TOOL like dbt
+  # (profiles gate it out of `make up`); Airflow runs it as the `dq_gate` task
+  # downstream of dbt_build at the seam ADR-010 D3 reserved. Ephemeral GX data
+  # context: credentials via env only, zero filesystem writes (ADR-011 D9);
+  # telemetry disabled — the tool speaks no HTTP at all.
+  dq:
+    build: ./dq
+    image: helios/dq:latest
+    container_name: helios-dq
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+      DQ_QUARANTINE_MAX_ROWS: ${DQ_QUARANTINE_MAX_ROWS:-10000}
+      GX_ANALYTICS_ENABLED: "false"
+    command: ["python", "-m", "dq", "gate"]
+    depends_on:
+      warehouse-db:
+        condition: service_healthy
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: helios-airflow-init
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_PASSWORD:-airflow_local_dev}
+    command: version
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: helios-airflow-webserver
+    command: webserver
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: helios-airflow-scheduler
+    command: scheduler
+    # ADR-010 D1: tasks invoke the one-shot tool containers through the host's
+    # rootless docker socket. AIRFLOW_UID is the HOST uid used only for the
+    # socket's host-side path (the containers run as the daemon's userns root,
+    # which maps to that same user — see the anchor note). The repo is mounted
+    # read-only at its EXACT host path (HELIOS_PROJECT_DIR): the compose file,
+    # its .env interpolation and the tool build contexts all resolve there and
+    # relative bind sources stay identical to compose-on-host.
+    environment:
+      <<: *airflow-common-env
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - /run/user/${AIRFLOW_UID:-50000}/docker.sock:/var/run/docker.sock
+      - ./:${HELIOS_PROJECT_DIR:?exported by the Makefile; export it before running docker compose by hand}:ro
+    healthcheck:
+      # exits 0 while this scheduler's heartbeat is fresh
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$$(hostname)\""]
+      interval: 15s
+      timeout: 30s
+      retries: 12
+      start_period: 45s
+    restart: unless-stopped
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --- Phase 4 item 11 (ADR-012): Marquez, the OpenLineage backend -----------
+  # Dedicated Postgres store: the api's baked config hardcodes user/password;
+  # the custom config (infra/marquez/marquez-helios.yml, mounted ro and picked
+  # via MARQUEZ_CONFIG) takes them from env instead. Lineage metadata is
+  # DERIVED state: `make clean` wipes it and one pipeline run re-derives the
+  # graph (wipe story, ADR-012 D5). The emitters (airflow, dbt-ol) do NOT
+  # depend_on marquez — observability is never on the write path (D6).
+  marquez-db:
+    image: postgres:16-alpine
+    container_name: helios-marquez-db
+    environment:
+      POSTGRES_USER: ${MARQUEZ_POSTGRES_USER:-marquez}
+      POSTGRES_PASSWORD: ${MARQUEZ_POSTGRES_PASSWORD:-marquez_local_dev}
+      POSTGRES_DB: marquez
+    volumes:
+      - marquez_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MARQUEZ_POSTGRES_USER:-marquez} -d marquez"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  marquez-api:
+    image: marquezproject/marquez:0.51.1
+    container_name: helios-marquez-api
+    environment:
+      MARQUEZ_CONFIG: /opt/marquez/marquez-helios.yml
+      MARQUEZ_PORT: "5000"
+      MARQUEZ_ADMIN_PORT: "5001"
+      POSTGRES_HOST: marquez-db
+      POSTGRES_PORT: "5432"
+      MARQUEZ_POSTGRES_USER: ${MARQUEZ_POSTGRES_USER:-marquez}
+      MARQUEZ_POSTGRES_PASSWORD: ${MARQUEZ_POSTGRES_PASSWORD:-marquez_local_dev}
+    ports:
+      - "${MARQUEZ_API_PORT:-5000}:5000"
+    volumes:
+      - ./infra/marquez/marquez-helios.yml:/opt/marquez/marquez-helios.yml:ro
+    # Dropwizard admin /healthcheck on the admin port (upstream-documented);
+    # the api image ships curl (verified on 0.51.1).
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5001/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 60s
+    depends_on:
+      marquez-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  marquez-web:
+    image: marquezproject/marquez-web:0.51.1
+    container_name: helios-marquez-web
+    environment:
+      # the web proxy requires all three (setupProxy.js exits without them)
+      MARQUEZ_HOST: marquez-api
+      MARQUEZ_PORT: "5000"
+      WEB_PORT: "3000"
+    ports:
+      - "${MARQUEZ_WEB_PORT:-3000}:3000"
+    # the proxy answers /healthcheck itself (setupProxy.js route); wget ships
+    # in the image, curl does not.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthcheck >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      marquez-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- Phase 4 item 12 (ADR-013): the metrics stack ---------------------------
+  # Each container individually earned (D4): the exporter is the ONLY bridge
+  # from Airflow 2.10.5's StatsD surface to Prometheus (no native endpoint
+  # exists — measured in the installed image); Prometheus and Grafana are
+  # pure PULL services. NO depends_on binds the pipeline to any of these —
+  # observability is never on the write path (D7): StatsD datagrams are
+  # dropped-not-queued when the exporter is down, scrape targets going away
+  # merely record up=0 (and fire HeliosScrapeTargetDown), and Grafana panels
+  # error visibly without touching any writer.
+  #
+  # Port collisions (measured on this host): host :9090 is taken by another
+  # local project's prometheus and host :3000 by our own marquez-web (ADR-012)
+  # — host knobs are PROMETHEUS_PORT=:9091 and GRAFANA_PORT=:3001; in-net the
+  # upstream defaults (:9090/:3000/:9125/:9102) are kept.
+  #
+  # Dashboards, datasources, scrape config, rules and the exporter mapping are
+  # CODE in observability/ (mounted ro). The TSDB and Grafana state live in
+  # named volumes — derived EPHEMERAL state, NOT re-derivable: a window whose
+  # metrics never reached the scraper is gone forever (the honest difference
+  # from lineage, ADR-012 D5).
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.31.0
+    container_name: helios-statsd-exporter
+    # Static IP on metrics-net (ADR-013 D7 amended): the airflow StatsD client
+    # caches the resolved destination for its process lifetime — the static
+    # address keeps that cache valid across ANY exporter restart/recreate.
+    networks:
+      default: {}
+      metrics-net:
+        ipv4_address: 172.31.0.9
+    command:
+      - --statsd.listen-udp=:9125
+      - --statsd.listen-tcp=:9125
+      - --web.listen-address=:9102
+      - --statsd.mapping-config=/etc/statsd-exporter/mappings.yml
+    volumes:
+      - ./observability/statsd-exporter/mappings.yml:/etc/statsd-exporter/mappings.yml:ro
+    # the prom/statsd images ship wget (probed on v0.31.0)
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9102/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    container_name: helios-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.0.8
+    container_name: helios-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana_local_dev}
+      # ADR-013 D5: the datasource provisioning YAML interpolates env vars
+      # against THIS container's environment — the DB credentials must be
+      # present here or the provisioned datasources resolve empty (found by
+      # boot verification: panels "No data", health API "password
+      # authentication failed for user grafana").
+      WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_local_dev}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_local_dev}
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  oltp_data:
+  warehouse_data:
+  airflow_db_data:
+  airflow_logs:
+  kafka_data:
+  soap_data:
+  filedrop_data:
+  marquez_db_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  # ADR-013 D7 (amended 2026-09-13): dedicated network with a FIXED subnet so
+  # statsd-exporter can hold the static address the airflow processes target.
+  metrics-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24

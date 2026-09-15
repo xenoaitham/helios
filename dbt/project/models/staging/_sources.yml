@@ -1,0 +1,62 @@
+version: 2
+
+# Raw zone sources (read-only — dbt never writes to `raw`). Freshness thresholds
+# are per cadence, NOT global (ADR-008 D4): CDC is ~2 s fresh in steady state
+# (measured), batch feeds are daily-by-design; a global threshold would cry wolf.
+
+sources:
+  - name: helios_oltp
+    description: >
+      OLTP change capture (ADR-005). One row per pk — the sink's lsn-guarded
+      upsert keeps the latest event; deletes stay as op='d' tombstones with
+      after IS NULL. Money/timestamps arrive as strings; staging casts.
+    schema: raw
+    freshness:
+      warn_after: {count: 2, period: minute}
+      error_after: {count: 10, period: minute}
+    loaded_at_field: landed_at
+    tables:
+      - name: cdc_users
+        description: Envelope per ADR-005; after IS NULL exactly when op='d'.
+      - name: cdc_orders
+      - name: cdc_order_items
+      - name: cdc_payments
+
+  - name: helios_soap
+    description: >
+      SOAP OrderManagement extracts (ADR-006/007): windowed GetOrders landed as
+      keyed rows with payload JSONB; timestamps naive UTC strings, money as
+      Decimal(2dp) strings.
+    schema: raw
+    freshness:
+      warn_after: {count: 26, period: hour}
+      error_after: {count: 50, period: hour}
+    loaded_at_field: landed_at
+    tables:
+      - name: soap_orders
+
+  - name: helios_file
+    description: >
+      file-drop CSV feeds (ADR-004/006/007): keyed upserts from the drop volume;
+      the customers feed is the batch PII surface.
+    schema: raw
+    freshness:
+      warn_after: {count: 26, period: hour}
+      error_after: {count: 50, period: hour}
+    loaded_at_field: landed_at
+    tables:
+      - name: file_customers
+      - name: file_products
+
+  - name: helios_rest
+    description: >
+      REST Pricing & Promotions walks (ADR-003/006/007): full cursor walks
+      landed keyed; money as integer cents.
+    schema: raw
+    freshness:
+      warn_after: {count: 26, period: hour}
+      error_after: {count: 50, period: hour}
+    loaded_at_field: landed_at
+    tables:
+      - name: rest_products
+      - name: rest_promotions

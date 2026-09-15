@@ -1,0 +1,9 @@
+# HELIOS dq gate (ADR-011): Great Expectations suites as a nonzero-exit
+# pipeline gate with dead-letter quarantine + replay. Pinned to the current
+# stable 1.x line, exact (ADR-011 D1) — hermetic one-shot image, upstream
+# churn cannot move a shipped gate. GX pulls sqlalchemy; psycopg2-binary is
+# the driver GX's SQLAlchemy layer and the tool's own dead-letter writes use.
+great-expectations==1.22.0
+sqlalchemy>=2,<3
+psycopg2-binary>=2.9,<3
+pytest>=8,<9

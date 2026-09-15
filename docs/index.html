@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HELIOS - legacy to lakehouse ETL platform</title>
+<meta name="description" content="A containerized enterprise data platform: SOAP, flat files, REST and CDC into a governed dimensional warehouse. Personal project.">
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #070b16; color: #c9d1d9;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 40px 0 10px; }
+  .hero { border-radius: 16px; overflow: hidden; border: 1px solid #1f2735; }
+  .hero img { display: block; width: 100%; height: auto; }
+  h1 { font-size: 28px; color: #ffd76a; margin: 34px 0 8px; letter-spacing: .5px; }
+  h2 { font-size: 19px; color: #e8edf6; margin: 34px 0 10px; border-bottom: 1px solid #1f2735; padding-bottom: 8px; }
+  p.lead { font-size: 17px; color: #b7c4dc; }
+  .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+  a { color: #79c0ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 14px; }
+  .card { background: #10151f; border: 1px solid #1f2735; border-radius: 10px; padding: 14px 16px; }
+  .card b { color: #ffd76a; display: block; margin-bottom: 4px; font-size: 15px; }
+  .card span { font-size: 14px; color: #8fa3c4; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 15px; }
+  td, th { border: 1px solid #1f2735; padding: 8px 12px; text-align: left; }
+  th { color: #8fa3c4; font-weight: 600; background: #10151f; }
+  pre {
+    background: #0d1117; border: 1px solid #1f2735; border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 14px; margin-top: 12px;
+  }
+  footer { margin: 50px 0 30px; color: #7385a3; font-size: 14px; }
+  .shot { border-radius: 12px; border: 1px solid #1f2735; width: 100%; height: auto; margin-top: 12px; }
+  .tag { display: inline-block; background: #10151f; border: 1px solid #2a3547; color: #cfe0ff;
+         border-radius: 999px; padding: 4px 12px; font-size: 13px; margin: 4px 6px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="hero"><img src="assets/helios-card.png" alt="HELIOS live: Airflow run grid, Grafana dashboard, Marquez job history and lineage graph - real captures"></div>
+  </header>
+
+  <h1>a legacy enterprise, in a compose file</h1>
+  <p class="lead">
+    HELIOS modernizes four "legacy" sources - a SOAP OrderManagement service, nightly CSV
+    drops, a flaky REST API and a busy OLTP database - into a governed dimensional
+    warehouse: Debezium CDC, Airflow orchestration, dbt transformations, Great Expectations
+    quality gates with dead-letter quarantine, Marquez lineage, Prometheus/Grafana.
+    Personal project, COMPLETE: every number below is reproducible with a make target.
+  </p>
+  <div style="margin-top:10px">
+    <span class="tag">SOAP 1.1 / spyne</span><span class="tag">Postgres x3</span>
+    <span class="tag">FastAPI</span><span class="tag">Kafka + Debezium</span><span class="tag">Airflow 2.10</span>
+    <span class="tag">dbt</span><span class="tag">Great Expectations</span><span class="tag">Marquez</span>
+    <span class="tag">Prometheus + Grafana</span><span class="tag">rootless docker</span>
+  </div>
+
+  <h2>what runs (17 containers, one make up)</h2>
+  <div class="grid">
+    <div class="card"><b>soap-service :8000</b><span>OrderManagement, basic auth, 382,179 orders (3y), idempotent creates, frozen WSDL contract</span></div>
+    <div class="card"><b>oltp + mutator</b><span>normalized 4-table schema, 5.4M+ rows seeded in one atomic COPY, continuous mutations churning WAL for CDC</span></div>
+    <div class="card"><b>cdc: debezium → kafka → sink</b><span>logical slot helios_cdc_slot, lsn-guarded idempotent upserts, replay-safe raw envelope</span></div>
+    <div class="card"><b>airflow daily_close :8080</b><span>nightly 05:00 UTC: ingest ×3 → dbt build → GE gate; 5/5 tasks green on every fired run</span></div>
+    <div class="card"><b>dbt + GE gate</b><span>14 models + SCD2 snapshot rebuilt every run; 144 dbt tests + 6 semantic suites, dead-letter + replay</span></div>
+    <div class="card"><b>marquez + prometheus + grafana</b><span>column-level lineage :3000, 3 alert rules :9091, dashboards as code :3001</span></div>
+  </div>
+
+  <img class="shot" src="assets/build-panes.png" alt="HELIOS build - four terminal panes with real command output">
+
+  <h2>scoreboard (all measured, evidence in the repo)</h2>
+  <table>
+    <tr><th>metric</th><th>value</th></tr>
+    <tr><td>tests</td><td>195 pytest · 144 dbt data tests · 32 dq unit tests, all green</td></tr>
+    <tr><td>smoke gate</td><td>stage 1: 26/26 checks + stage 2: full E2E close, exit 0 - 17 containers healthy</td></tr>
+    <tr><td>bench (3 passes)</td><td>full load 14.1M rows in 65–82 s (172k–217k rows/s); SOAP re-read 382,179 @ 2,637–2,773 rows/s; CDC applied 7.4–7.7 events/s</td></tr>
+    <tr><td>chaos</td><td>7/7 destructive scenarios, measured recovery + convergence proofs (suite wall 3,204 s)</td></tr>
+    <tr><td>ADRs</td><td>17 (adr-000 … adr-016) - every decision has an alternatives table</td></tr>
+    <tr><td>verification</td><td>make smoke-test · make docs-verify · 195 pytest · 144 dbt tests · 32 dq tests - all green at close</td></tr>
+  </table>
+
+  <h2>run it yourself</h2>
+  <pre class="mono">git clone https://github.com/xenoaitham/helios.git
+cd helios
+make up          # 17 containers, wait-gated on health (first run seeds the sources;
+                 #  fresh volume: non-zero on cdc-sink by design until the one-time CDC bootstrap)
+make cdc-setup && docker compose restart cdc-sink   # that one-time bootstrap, then `make up` again
+make smoke-test  # green end-to-end: 26 infra checks + a real orchestrated close
+make run-etl     # trigger the full pipeline and watch it
+make docs-verify # the docs honesty sweep: targets, paths, evidence, no unverifiable numbers</pre>
+
+  <h2>see it run</h2>
+  <p>
+    Real captures from the live stack are in <a href="https://github.com/xenoaitham/helios/tree/main/screenshots">screenshots/</a>:
+    the Airflow grid (25 nightly closes, chaos-era failures honestly red), the Grafana
+    observability dashboard, and Marquez with the full lineage graph into
+    <span class="mono">fct_orders</span>.
+  </p>
+
+  <h2>dig deeper</h2>
+  <p>
+    <a href="https://github.com/xenoaitham/helios">the repo</a> &#183;
+    <a href="https://github.com/xenoaitham/helios/blob/main/README.md">readme</a> &#183;
+    <a href="https://github.com/xenoaitham/helios/tree/main/devlogs">12 devlogs</a> &#183;
+    <a href="https://github.com/xenoaitham/helios/tree/main/screenshots">screenshots</a> ·
+    <a href="https://github.com/xenoaitham/helios/tree/main/DECISIONS">ADRs</a> ·
+    <a href="https://github.com/xenoaitham/helios/blob/main/docs/RUNBOOK.md">runbook</a>
+  </p>
+
+  <footer>
+    a personal project, built end to end on one machine - every number below reproducible with a make target.
+    start at README.md and docs/RUNBOOK.md.
+  </footer>
+
+</div>
+</body>
+</html>

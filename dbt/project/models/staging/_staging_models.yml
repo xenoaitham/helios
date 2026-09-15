@@ -1,0 +1,205 @@
+version: 2
+
+# Staging test contract (ADR-008 D6).
+# Severity policy: relationships between LIVE CDC models (items→orders,
+# payments→orders) are severity warn — a mutator delete transaction whose
+# order-side and item-side tombstones straddle the run cut is a µs-window
+# possibility by construction (ADR-008 D3); a warn here is a real signal to
+# record, not an error to page on. Everything stable (batch feeds, users) is
+# error severity.
+
+models:
+  - name: stg_users
+    description: Current OLTP users; email/full_name pseudonymized per ADR-008 D1.
+    columns:
+      - name: user_id
+        data_tests: [unique, not_null]
+      - name: email_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: full_name_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: country_code
+        data_tests: [not_null]
+      - name: is_active
+        data_tests: [not_null]
+      - name: created_at
+        data_tests: [not_null]
+
+  - name: stg_orders
+    description: Current OLTP orders (tombstones filtered at this boundary).
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: user_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_users')
+              field: user_id
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['NEW', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
+      - name: currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['USD']
+      - name: total_amount
+        data_tests: [not_null]
+      - name: placed_at
+        data_tests: [not_null]
+
+  - name: stg_order_items
+    description: Current OLTP order items (largest model, ~4.3M rows).
+    columns:
+      - name: order_item_id
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+              config:
+                severity: warn
+                description: live-CDC read-skew tolerance (delete-straddle between model SELECTs), ADR-008 D3
+      - name: product_sku
+        data_tests: [not_null]
+      - name: quantity
+        data_tests: [not_null]
+      - name: unit_price
+        data_tests: [not_null]
+
+  - name: stg_payments
+    description: Current OLTP payments; REFUNDED rows carry negated amounts.
+    columns:
+      - name: payment_id
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+              config:
+                severity: warn
+                description: live-CDC read-skew tolerance (delete-straddle between model SELECTs), ADR-008 D3
+      - name: method
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['card', 'paypal', 'bank_transfer', 'gift_card']
+      - name: amount
+        data_tests: [not_null]
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['CAPTURED', 'PENDING', 'REFUNDED']
+      - name: paid_at
+        data_tests: [not_null]
+
+  - name: stg_soap_orders
+    description: Legacy SOAP orders; status vocabulary shared with stg_orders.
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests: [not_null]
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['NEW', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
+      - name: total_amount
+        data_tests: [not_null]
+      - name: currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['USD']
+      - name: created_at
+        data_tests: [not_null]
+      - name: updated_at
+        data_tests: [not_null]
+
+  - name: stg_file_customers
+    description: Batch customers feed; batch PII surface hashed per ADR-008 D1.
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+      - name: email_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: full_name_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: country_code
+        data_tests: [not_null]
+      - name: signup_date
+        data_tests: [not_null]
+      - name: tier
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['bronze', 'silver', 'gold', 'platinum']
+
+  - name: stg_file_products
+    description: Batch products feed (prices as integer cents).
+    columns:
+      - name: sku
+        data_tests: [unique, not_null]
+      - name: name
+        data_tests: [not_null]
+      - name: price_cents
+        data_tests: [not_null]
+      - name: supplier_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['SUP-A', 'SUP-B', 'SUP-C', 'SUP-D']
+
+  - name: stg_rest_products
+    description: REST catalog products (prices as integer cents, shared SKU space).
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+      - name: sku
+        data_tests: [unique, not_null]
+      - name: name
+        data_tests: [not_null]
+      - name: category
+        data_tests: [not_null]
+      - name: currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['USD']
+      - name: price_cents
+        data_tests: [not_null]
+
+  - name: stg_rest_promotions
+    description: REST promotions; product_sku must exist in the shared catalog.
+    columns:
+      - name: promotion_id
+        data_tests: [unique, not_null]
+      - name: product_sku
+        data_tests: [not_null]
+      - name: discount_percent
+        data_tests: [not_null]
+      - name: starts_at
+        data_tests: [not_null]
+      - name: ends_at
+        data_tests: [not_null]

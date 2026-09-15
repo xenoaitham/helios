@@ -1,0 +1,141 @@
+version: 2
+
+# Marts test contract (ADR-009 D6).
+# Severity policy: the published layer is strict — a µs-window live-CDC
+# straddle that staging only warns about (ADR-008 D3) FAILS here loudly and
+# is retried by the orchestrator (item 9); a mart must never publish a row it
+# cannot reconcile. Same-run row parity tests are deterministic: tests read
+# the built relations, staging is static within a run.
+
+models:
+  - name: dim_customer
+    description: >
+      SCD2 customer dimension — projection of the protected snapshot
+      (snapshots.customers_snapshot); half-open windows [valid_from, valid_to).
+    columns:
+      - name: customer_sk
+        description: Surrogate key (= dbt_scd_id); one row per version.
+        data_tests: [unique, not_null]
+      - name: customer_id
+        description: Natural key (OLTP user_id).
+        data_tests: [not_null]
+      - name: email_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: full_name_hash
+        data_tests:
+          - not_null
+          - values_match_regex:
+              pattern: '^[0-9a-f]{64}$'
+      - name: country_code
+        data_tests: [not_null]
+      - name: is_active
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+
+  - name: dim_product
+    description: >
+      SCD1 product dimension over the shared SKU space (rest ∪ file, REST
+      precedence on the 105-SKU overlap; natural key = sku).
+    columns:
+      - name: sku
+        data_tests: [unique, not_null]
+      - name: name
+        data_tests: [not_null]
+      - name: category
+        data_tests: [not_null]
+      - name: price_cents
+        data_tests: [not_null]
+      - name: source_feed
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['rest', 'file']
+
+  - name: dim_date
+    description: Generated calendar, day grain, spanning the full order range.
+    columns:
+      - name: date_key
+        description: YYYYMMDD integer.
+        data_tests: [unique, not_null]
+      - name: date_day
+        data_tests: [unique, not_null]
+      - name: iso_day_of_week
+        data_tests: [not_null]
+      - name: is_weekend
+        data_tests: [not_null]
+
+  - name: fct_orders
+    description: >
+      Order-grain fact: OLTP ∪ SOAP under source_type. SOAP customer is the
+      Kimball unknown member (customer_sk NULL ⇔ soap, singular-tested).
+    data_tests:
+      - unique_combination:
+          columns: ['source_type', 'order_id']
+    columns:
+      - name: source_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['oltp', 'soap']
+      - name: order_id
+        data_tests: [not_null]
+      - name: customer_id
+        data_tests: [not_null]
+      - name: customer_sk
+        description: >
+          SCD2-resolved surrogate; NULL exactly for SOAP (unknown member).
+          Referential check ignores NULLs by design.
+        data_tests:
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_sk
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['NEW', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
+      - name: currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['USD']
+      - name: total_amount
+        data_tests: [not_null]
+      - name: order_ts
+        data_tests: [not_null]
+      - name: order_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+
+  - name: fct_order_items
+    description: >
+      Line-grain fact (OLTP-only). Order-level dims carried from fct_orders;
+      dim_product join is LEFT — catalog coverage ~6.89% of rows by seed
+      design, parity-tested, never an inner join.
+    columns:
+      - name: order_item_id
+        data_tests: [unique, not_null]
+      - name: source_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['oltp']
+      - name: order_id
+        data_tests: [not_null]
+      - name: product_sku
+        data_tests: [not_null]
+      - name: quantity
+        data_tests: [not_null]
+      - name: unit_price
+        data_tests: [not_null]
+      - name: line_revenue
+        data_tests: [not_null]

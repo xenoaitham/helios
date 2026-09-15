@@ -1,0 +1,5 @@
+# HELIOS cdc-sink (ADR-005): Kafka consumer applying Debezium events into the
+# warehouse raw zone with lsn-guarded upserts. Slim base + binary wheels only.
+kafka-python>=2.2,<3
+psycopg[binary]>=3.2,<4
+pytest>=8,<9

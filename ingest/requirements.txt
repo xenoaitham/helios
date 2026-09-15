@@ -1,0 +1,7 @@
+# HELIOS ingest lib (ADR-006/007): one-shot batch extractors (soap/file/rest)
+# into the warehouse raw zone. Slim base + binary wheels only; zeep pulls
+# requests/lxml for the SOAP client.
+psycopg[binary]>=3.2,<4
+zeep>=4.2,<5
+requests>=2.31,<3
+pytest>=8,<9
