@@ -8,18 +8,25 @@
 **This is a personal project** (not employment work). Every number below was measured on
 the machine it was built on, and every claim maps to a `make` target you can run.
 
-| Milestone | What it covers | State |
-|---|---|---|
-| 0 | Scaffold: compose baseline, Makefile, health gating | done |
-| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder + mutator | done |
-| 2 | Movement: Debezium CDC -> Kafka -> raw zone; batch extractors | done |
-| 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | done |
-| 4 | Trust & observability: Great Expectations gates, Marquez lineage, Prometheus + Grafana | done |
-| 5 | Chaos & performance: `make chaos-test` (7/7 scenarios), `make bench` (three measured passes) | done |
-| 6 | Package: RUNBOOK, data dictionary, design notes, screenshots | done |
+**Live showcase:** [https://xenoaitham.github.io/helios-site/](https://xenoaitham.github.io/helios-site/)
+(real captures of the running UIs). The capture files themselves are in
+[`screenshots/`](screenshots/).
 
-Want to see it without running it? Real captures of the live UIs are in
-[`screenshots/`](screenshots/) (Airflow grid, Grafana dashboard, Marquez lineage).
+What's in the box:
+
+- **Four sources**: a legacy SOAP 1.1 OrderManagement service (frozen WSDL contract, 382k
+  orders), nightly dirty CSV feeds, a rate-limited flaky REST API, and a 5M+-row OLTP
+  Postgres mutated continuously.
+- **Two ingestion doors**: Debezium CDC (WAL -> Kafka -> lsn-guarded idempotent sink) and a
+  batch ingest library (watermarks, retry/backoff, content-hash idempotent landing).
+- **A governed warehouse**: dbt-built staging + star schema with SCD2 customer history, PII
+  hashed at the staging boundary (SHA-256 + env salt).
+- **A quality gate that blocks**: Great Expectations suites over frozen marts, dead-letter
+  quarantine with replay - bad rows never publish.
+- **Orchestration**: Airflow `daily_close` (nightly 05:00 UTC) composing all of it, with
+  honest backfill semantics.
+- **Trust rails**: Marquez table+column lineage, Prometheus + Grafana with three real alert
+  rules, a 7-scenario chaos suite with measured recovery, and a three-pass benchmark.
 
 ## Quickstart
 
@@ -36,8 +43,7 @@ First run creates `.env` from `.env.example` (local-dev defaults) automatically,
 the images once (sizes visible via `docker images` - Airflow is the big one), and seeds
 the sources (SOAP ~382k orders ~44 s; OLTP 5.4M rows ~3.5 min). The full fresh-clone walk -
 including the one-time CDC bootstrap and first close - is the
-[recover-from-scratch drill](docs/RUNBOOK.md#4-recovery-from-scratch-drill--the-honest-version-adr-016-d1)
-in the RUNBOOK.
+[recover-from-scratch drill](docs/RUNBOOK.md) in the RUNBOOK.
 
 ### What is running now
 

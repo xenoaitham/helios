@@ -15,7 +15,7 @@ Every claim maps to a `make` target you can run.
 | `make clean` | **DESTRUCTIVE**: stop + delete all data volumes (warehouse re-inits schemas; SOAP store re-seeds on next `make up`) - see §4.2 for what that costs on a used stack |
 | `make docs-verify` | Mechanical docs sweep: make targets, links, repo paths, credential-shaped literals (ADR-016 D3); transcript written locally |
 
-Phase 1 additions (soap-service):
+SOAP service:
 
 | Command | Effect |
 |---|---|
@@ -25,7 +25,7 @@ Phase 1 additions (soap-service):
 | `make test-soap` | pytest suite (35 tests) in a throwaway container |
 | `make contract-freeze` | Re-capture `soap-service/contract/OrderManagement.wsdl` after a deliberate contract change |
 
-Phase 1 additions (oltp source, ADR-002):
+OLTP source (ADR-002):
 
 | Command | Effect |
 |---|---|
@@ -38,9 +38,9 @@ Phase 1 additions (oltp source, ADR-002):
 Notes: fresh clones seed automatically on `make up` (the one-shot `oltp-seed` service
 runs before `oltp-mutator` starts; ~3.5 min at default scale - `WAIT_TIMEOUT` defaults
 to 900 s to cover it). The mutator writes continuously (updates + bounded inserts/
-deletes) precisely so Phase-2 CDC sees WAL churn; `make oltp-status` is the instrument.
+deletes) precisely so CDC has WAL churn to capture; `make oltp-status` is the instrument.
 
-Phase 1 additions (rest-mock, ADR-003):
+REST mock (ADR-003):
 
 | Command | Effect |
 |---|---|
@@ -52,7 +52,7 @@ while debugging an extractor, 0 to silence), `REST_MOCK_RATE_CAPACITY` /
 `REST_MOCK_RATE_REFILL_PER_SEC` (default 30 / 10 per second). Send an `X-API-Key`
 header to get an isolated rate bucket.
 
-Phase 1 additions (file-drop, ADR-004):
+File drop (ADR-004):
 
 | Command | Effect |
 |---|---|
@@ -66,7 +66,7 @@ same inputs give byte-identical files; re-running the same batch date overwrites
 place. The drop volume grows until cleaned - targeted `docker compose run --rm
 filedrop-tools sh -c "rm /data/drop/<file>"` or `make down -v` (destroys ALL data).
 
-Phase 2 additions (ingest lib, ADR-006/007):
+Ingest library (ADR-006/007):
 
 | Command | Effect |
 |---|---|
@@ -77,7 +77,7 @@ Phase 2 additions (ingest lib, ADR-006/007):
 | `make ingest-status` | Watermarks, landed counts, file ledger, quarantine summary, run ledger |
 | `make test-ingest` | 54 pytest tests in a throwaway container (dedicated `ingest_test` db) |
 
-Notes: extractors are one-shot tools (Airflow schedules them in Phase 3). Re-landing
+Notes: extractors are one-shot tools (Airflow schedules them - see the orchestration section below). Re-landing
 identical content is a physical no-op (content-hash-guarded upserts) - rerunning
 anything is always safe. SOAP first-ever run pulls full history (~382k orders,
 ~2.5 min measured); subsequent runs pull only the overlap window (~4 s measured).
@@ -85,7 +85,7 @@ Old-order status changes need `--full` (the API filters on `created_at` only).
 Quarantine triage: `make ingest-status` shows reason + physical row number; fix the
 source file and regenerate - the hash change re-lands it on the next run.
 
-Phase 3 additions (dbt staging, ADR-008):
+dbt (ADR-008):
 
 | Command | Effect |
 |---|---|
@@ -107,7 +107,7 @@ first, never run a stale image; (2) when staging/raw counts "disagree", check
 `make cdc-status` lag first - the sink draining a backlog (or simply applying
 events mid-build) moves raw underneath you; a mutator pause is NOT a raw freeze.
 
-Phase 3 additions (Airflow orchestration, ADR-010):
+Airflow orchestration (ADR-010):
 
 | Command | Effect |
 |---|---|
@@ -148,7 +148,7 @@ Orchestrator notes a stranger needs:
   scheduler's repo mount + DAG tasks `cd` there; bind-source parity, ADR-010
   D1). Missing var = loud interpolation error by design.
 
-Phase 4 additions (metrics, ADR-013):
+Metrics stack (ADR-013):
 
 | Command | Effect |
 |---|---|
@@ -224,7 +224,7 @@ curl -su "$SOAP_BASIC_AUTH_USER:$SOAP_BASIC_AUTH_PASSWORD" \
 | `make up` timeout on a container | `docker logs helios-<svc>` (wait-healthy.sh prints tail) | Fix env/port, `make down && make up` |
 | Port already in use | `ss -ltn \| grep <port>` | Change `*_PORT` in `.env`, `make down && make up` |
 | `smoke-test` Stage 1 fails | Some container unhealthy or not answering | `make down && make up`; if persists, `docker logs helios-<svc>` |
-| Warehouse missing schemas | Volume was created before init script existed | `make clean && make up` (destroys data - Phase 0 has none worth keeping) |
+| Warehouse missing schemas | Volume was created before init script existed | `make clean && make up` (destroys data - on a fresh stack there is nothing worth keeping) |
 | Airflow UI 502 / not up yet | webserver start_period ~30-60s | Re-run `make ps`; check `helios-airflow-init` exited 0 |
 | First `make up` slow on soap-service | First boot seeds ~382k orders (~45 s); healthcheck `start_period` 150 s covers it | Nothing - subsequent boots skip (store non-empty) |
 | First `make up` slow on oltp-seed | Fresh volume: schema + 5.4M-row COPY seed (~3.5 min); `make up` waits via oltp-mutator's dependency chain | Nothing - subsequent boots hit the `--if-empty` skip (~1 s) |
@@ -243,7 +243,7 @@ curl -su "$SOAP_BASIC_AUTH_USER:$SOAP_BASIC_AUTH_PASSWORD" \
 
 **What this section is:** the complete walk from a bare clone to a green stack,
 with the expected output at every step. **What honestly happened:** the drill was
-EXECUTED and recorded at Phase 0 (`make clean && make up`
+EXECUTED and recorded at scaffold time (`make clean && make up`
 → all healthy, schemas re-created) when the platform was 8 containers; the
 platform has since grown to 17 and the drill has NOT been re-executed on this
 living stack - deliberately (ADR-016 D1: `make clean` here would destroy the
@@ -269,7 +269,7 @@ make up
 ```
 
 Expected: images pull (first run only); one-shot seeds run before health is
-declared - SOAP seeds ~382k orders (~44 s measured at Phase 1) and OLTP copies
+declared - SOAP seeds ~382k orders (~44 s measured) and OLTP copies
 5.4M rows in one transaction (~3.5 min, `WAIT_TIMEOUT=900` covers it). **On a
 truly fresh volume, `make up` then ends NON-ZERO - by design**: `cdc-sink`
 cannot reach connector RUNNING (a fresh `oltp-db` still has
@@ -330,7 +330,7 @@ its graph), Grafana at :3001, and `make dq-status` reporting 0 incidents.
 Decision + alternatives: ADR-016 D1. On a fresh clone none of this applies -
 §4.1 is exactly what `make clean && make up` gives you, minus nothing.
 
-## 4b. CDC operations (Phase 2, ADR-005)
+## 4b. CDC operations (ADR-005)
 
 The capture path is `oltp-db (wal_level=logical) → cdc-connect (Debezium, pgoutput)
 → Kafka topics helios.public.<table> → cdc-sink → warehouse raw.cdc_<table>`.
@@ -369,7 +369,7 @@ additive drift is invisible end-to-end (the live probe column
 `users.loyalty_tier`, all-NULL, is still in the source as the exhibit); a
 rename breaks the mutator loudly while the pipeline stays unaware.
 
-### Snapshot protection (Phase 3 item 8, ADR-009)
+### Snapshot protection (ADR-009)
 
 `snapshots.customers_snapshot` is the SCD2 history store - the only dbt
 relation whose state persists across builds.
@@ -388,7 +388,7 @@ relation whose state persists across builds.
   build would record ~50 k "changes". Treat salt rotation as a destructive,
   planned event: rotate AND consciously rebuild the snapshot from scratch.
 
-### Airflow operations (Phase 3 item 9, ADR-010)
+### Airflow operations (ADR-010)
 
 | Task | Command | Notes |
 |---|---|---|
@@ -413,10 +413,10 @@ relation whose state persists across builds.
   `soap:address` alternates `localhost`/`soap-service` across requests; the
   ingest extractor pins its zeep endpoint to the validated base URL (contract
   from the WSDL, routing never). Hand-rolled clients should do the same.
-- SLA misses surface in the UI only (no SMTP in this stack; alerting is
-  Phase 4 item 12).
+- SLA misses surface in the UI only (no SMTP in this stack; the Prometheus
+  rules and the DQ gate cover alerting).
 
-### DQ gate operations (Phase 4 item 10, ADR-011)
+### DQ gate operations (ADR-011)
 
 The semantic gate (`dq_gate` task, after `dbt_build` in `daily_close`) runs
 Great Expectations suites over the FROZEN staging/marts relations every build
@@ -452,7 +452,7 @@ structured `dq.gate_failed` JSON event, and the `dq.dq_quarantine` table
 itself. No SMTP/Slack exists and none is faked; real push-alerting arrives
 with item 12 (Prometheus rules).
 
-### 4c. Lineage operations (Phase 4 item 11, ADR-012)
+### 4c. Lineage operations (ADR-012)
 
 Marquez is the OpenLineage backend: `marquez-db` (dedicated Postgres, volume
 `marquez_db_data`), `marquez-api` (lineage REST :5000, admin :5001 with
