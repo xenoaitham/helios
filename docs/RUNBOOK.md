@@ -1,8 +1,7 @@
 # RUNBOOK - operating HELIOS
 
-Complete through Phase 6 (project close). Audience: a stranger with the repo and Docker.
-Every claim maps to a `make` target or a file you can check; every number cites its
-`EVIDENCE/` home.
+Complete through milestone 6 (project close). Audience: a stranger with the repo and Docker.
+Every claim maps to a `make` target you can run.
 
 ## 1. Daily driver commands
 
@@ -14,7 +13,7 @@ Every claim maps to a `make` target or a file you can check; every number cites 
 | `make smoke-test` | Stage 1: 26 infra checks incl. SOAP WSDL + auth (must pass). Stage 2: a real orchestrated close + mart parity, SCD2, dead-letter, lineage and metrics assertions - exit 0 when green, loud on any mismatch |
 | `make down` | Stop platform; named data volumes preserved |
 | `make clean` | **DESTRUCTIVE**: stop + delete all data volumes (warehouse re-inits schemas; SOAP store re-seeds on next `make up`) - see §4.2 for what that costs on a used stack |
-| `make docs-verify` | Mechanical docs honesty sweep: make targets, repo paths, EVIDENCE refs, credential-shaped literals, resume-bullet number anchors (ADR-016 D3); transcript → `EVIDENCE/docs-verify.log` |
+| `make docs-verify` | Mechanical docs sweep: make targets, links, repo paths, credential-shaped literals (ADR-016 D3); transcript written locally |
 
 Phase 1 additions (soap-service):
 
@@ -97,9 +96,8 @@ Phase 3 additions (dbt staging, ADR-008):
 
 Notes: models are TABLES rebuilt full on every run - each `dbt build` re-materializes
 the whole published corpus (~14.1M rows measured; `stg_order_items` ~5.45M rows is the
-long pole; measured walls and honest per-stage bands in `EVIDENCE/metrics.md`: full
-build 65–82 s across three passes on the dev laptop) - CDC current state is `op <> 'd'`
-over the raw envelopes, and
+long pole; full build 65–82 s across three measured passes on the dev laptop) - CDC
+current state is `op <> 'd'` over the raw envelopes, and
 staging keeps `_cdc_lsn`/`_batch_ref` provenance. PII (`users` and `file_customers`
 email/full_name) becomes `*_hash` = SHA-256(lower(trim(v)) || `PII_HASH_SALT`)
 here; raw keeps cleartext, marts must never receive it (item 8). Rotating
@@ -136,8 +134,7 @@ Orchestrator notes a stranger needs:
   (epoch→now, ~2.5 min, hash-guarded no-op for unchanged rows).
 - **Idempotency triage stays the same**: count drift between runs is live-CDC
   churn - `make cdc-status` FIRST. Under a deliberately quiesced upstream, two
-  consecutive `make run-etl` runs are bit-identical (proven in
-  EVIDENCE/phase-3-airflow.md).
+  consecutive `make run-etl` runs are bit-identical (measured at build time).
 - **Do not** run `make dbt-build` by hand while a `daily_close` run is active:
   `max_active_runs=1` serializes DAG-initiated builds only; a manual build can
   still race the DAG's (two full-refresh-rebuilt marts layers = wasted work, and
@@ -155,8 +152,8 @@ Phase 4 additions (metrics, ADR-013):
 
 | Command | Effect |
 |---|---|
-| `make metrics-verify` | Assert MEASURED metrics via the Prometheus/Grafana APIs (targets up, rules loaded, mapped metric names in the exporter, real query values, provisioned datasources + dashboard) and dump evidence to `EVIDENCE/phase-4-metrics/`; nonzero on any missing surface |
-| `make metrics-drill` | Alert fire-drill: stop `statsd-exporter` (a genuinely scraped target) → assert `HeliosScrapeTargetDown` FIRES via `/api/v1/alerts` → restart → assert recovery; dumps `EVIDENCE/phase-4-metrics/drill/` |
+| `make metrics-verify` | Assert MEASURED metrics via the Prometheus/Grafana APIs (targets up, rules loaded, mapped metric names in the exporter, real query values, provisioned datasources + dashboard); nonzero on any missing surface |
+| `make metrics-drill` | Alert fire-drill: stop `statsd-exporter` (a genuinely scraped target) → assert `HeliosScrapeTargetDown` FIRES via `/api/v1/alerts` → restart → assert recovery |
 
 Metrics operations a stranger needs:
 
@@ -246,7 +243,7 @@ curl -su "$SOAP_BASIC_AUTH_USER:$SOAP_BASIC_AUTH_PASSWORD" \
 
 **What this section is:** the complete walk from a bare clone to a green stack,
 with the expected output at every step. **What honestly happened:** the drill was
-EXECUTED and recorded at Phase 0 (`EVIDENCE/phase-0.md`: `make clean && make up`
+EXECUTED and recorded at Phase 0 (`make clean && make up`
 → all healthy, schemas re-created) when the platform was 8 containers; the
 platform has since grown to 17 and the drill has NOT been re-executed on this
 living stack - deliberately (ADR-016 D1: `make clean` here would destroy the
@@ -294,8 +291,8 @@ Expected after the bootstrap: `make ps` shows **17 helios containers** healthy
 Kafka, soap-service, rest-mock, oltp-mutator, cdc-connect, cdc-sink,
 marquez-db/api/web, statsd-exporter, prometheus, grafana), and
 `make cdc-status` shows the connector RUNNING with the initial snapshot
-draining - **~877 s measured** for the 5.5M-event snapshot
-(`EVIDENCE/phase-2-cdc.md`). `cdc-setup` is NOT needed again on a stack whose
+draining - **~877 s measured** for the 5.5M-event snapshot.
+`cdc-setup` is NOT needed again on a stack whose
 volume already has logical WAL (it is idempotent; when in doubt, run it).
 
 ```bash
@@ -303,10 +300,10 @@ make run-etl       # first full close: SOAP full read + dbt + gate
 ```
 
 Expected: run_id `etl-<ts>`; the SOAP extractor's FIRST pull is the full
-history (~382k orders, ~2.5 min measured, `EVIDENCE/phase-2-ingest.md`); the
+history (~382k orders, ~2.5 min measured); the
 file/REST legs are near-zero-work on a fresh drop volume; `dbt_build`
-materializes staging+marts (~14M rows; 65–82 s on the dev laptop,
-`EVIDENCE/metrics.md`); `dq_gate` goes green; exit 0. The SCD2 snapshot's
+materializes staging+marts (~14M rows; 65–82 s on the dev laptop);
+`dq_gate` goes green; exit 0. The SCD2 snapshot's
 history BEGINS on this stack at this build - record your own
 `min(dbt_valid_from)`; from then on it must never move (§4b snapshot rules).
 
@@ -380,8 +377,7 @@ relation whose state persists across builds.
 - NEVER run the marts build with `--full-refresh`: a snapshot full-refresh
   drops and re-creates it from current state = instant history wipe.
   `make dbt-build` is deliberately a plain `dbt build` - keep it that way.
-  The DAG's `dbt_build` task is the same plain build (verified by grep in
-  EVIDENCE/phase-3-airflow.md).
+  The DAG's `dbt_build` task is the same plain build (grep-verified).
 - NEVER `drop schema snapshots` / truncate the table outside `make clean`
   (which wipes everything and reseeds).
 - History starts at the snapshot's first run; a normal `dbt build` only ever
@@ -467,7 +463,7 @@ build` command `make dbt-build` and the DAG task have always used).
 
 | Task | Command | Notes |
 |---|---|---|
-| Verify measured lineage | `make lineage-verify` | API-asserts the dataset graph, daily_close jobs (incl. dq_gate) and column-level lineage into `fct_orders`; dumps JSON/CSV to `EVIDENCE/phase-4-lineage/` |
+| Verify measured lineage | `make lineage-verify` | API-asserts the dataset graph, daily_close jobs (incl. dq_gate) and column-level lineage into `fct_orders` |
 | Look at the graph | http://localhost:3000 | pick a dataset → lineage graph; the **column-level** page renders per-column edges (e.g. `dim_customer.customer_sk ─→ fct_orders.customer_sk`) |
 | Wipe the lineage store | `make down -v` deletes it (or full `make clean`) | lineage is DERIVED state: one `make dbt-build` + `make run-etl` re-derives the graph; no source data touched |
 | Backend outage | `docker compose stop marquez-api` | the pipeline is non-fatal by contract (ADR-012 D6): dbt build and daily_close stay green (emission retries add ~9 s/event ≈ up to ~12 min to dbt_build under a total outage - inside the task's 20-min timeout); events resume on `docker compose start marquez-api` + the next build/run. Emissions attempted during an outage are dropped by the client (no queueing/backfill). |

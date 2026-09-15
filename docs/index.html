@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HELIOS - legacy to lakehouse ETL platform</title>
-<meta name="description" content="A containerized enterprise data platform: SOAP, flat files, REST and CDC into a governed dimensional warehouse. Personal project, built in the open.">
+<meta name="description" content="A containerized enterprise data platform: SOAP, flat files, REST and CDC into a governed dimensional warehouse. Personal project.">
 <style>
   :root { color-scheme: dark; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -82,7 +82,7 @@
     <tr><td>bench (3 passes)</td><td>full load 14.1M rows in 65–82 s (172k–217k rows/s); SOAP re-read 382,179 @ 2,637–2,773 rows/s; CDC applied 7.4–7.7 events/s</td></tr>
     <tr><td>chaos</td><td>7/7 destructive scenarios, measured recovery + convergence proofs (suite wall 3,204 s)</td></tr>
     <tr><td>ADRs</td><td>17 (adr-000 … adr-016) - every decision has an alternatives table</td></tr>
-    <tr><td>evidence</td><td>every claim maps to a make target or a file in EVIDENCE/ - enforced by make docs-verify</td></tr>
+    <tr><td>verification</td><td>make smoke-test · make docs-verify · 195 pytest · 144 dbt tests · 32 dq tests - all green at close</td></tr>
   </table>
 
   <h2>run it yourself</h2>
@@ -108,14 +108,14 @@ make docs-verify # the docs honesty sweep: targets, paths, evidence, no unverifi
     <a href="https://github.com/xenoaitham/helios">the repo</a> &#183;
     <a href="https://github.com/xenoaitham/helios/blob/main/README.md">readme</a> &#183;
     <a href="https://github.com/xenoaitham/helios/tree/main/devlogs">12 devlogs</a> &#183;
-    <a href="https://github.com/xenoaitham/helios/tree/main/EVIDENCE">evidence logs</a> &#183;
-    <a href="https://github.com/xenoaitham/helios/tree/main/DECISIONS">ADRs</a> &#183;
-    <a href="https://github.com/xenoaitham/helios/blob/main/docs/RUNBOOK.md">runbook</a> &#183;
-    <a href="https://github.com/xenoaitham/helios/blob/main/docs/INTERVIEW_DEFENSE.md">interview defense</a>
+    <a href="https://github.com/xenoaitham/helios/tree/main/screenshots">screenshots</a> ·
+    <a href="https://github.com/xenoaitham/helios/tree/main/DECISIONS">ADRs</a> ·
+    <a href="https://github.com/xenoaitham/helios/blob/main/docs/RUNBOOK.md">runbook</a> ·
+    <a href="https://github.com/xenoaitham/helios/blob/main/docs/DESIGN_NOTES.md">design notes</a>
   </p>
 
   <footer>
-    a personal project by a solution architect candidate, built in the open, one milestone at a time.
+    a personal project, built end to end on one machine - every number below reproducible with a make target.
     complete 2026-09-15: start at README.md, then docs/RUNBOOK.md and docs/INTERVIEW_DEFENSE.md.
   </footer>
 

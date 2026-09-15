@@ -16,13 +16,13 @@ mutator moves them hourly, so measure rather than trust any count.
     marts NEVER receive cleartext PII.
   - `masked` - quasi-identifiers kept analytically useful but coarsened
     (e.g. birth year only, email domain only).
-- Rationale (compliance-adjacent, documented for interviews): hashing preserves
+- Rationale (compliance-adjacent design note): hashing preserves
   joinability across feeds at exact-match granularity while removing cleartext PII from
   all consumer-facing schemas; salt lives outside the repo; determinism is required for
   SCD2 change detection on identity fields.
 - Marts PII-freedom is enforced by CONSTRUCTION (the staging models select only
   `*_hash` - the cleartext column never enters the dbt DAG) and PROVEN by SQL
-  audits (`EVIDENCE/phase-3-marts.md`: 0 cleartext columns, 0 non-hex hashes)
+  audits run at build time (0 cleartext columns, 0 non-hex hashes)
   plus a smoke assertion. The GE gate owns business semantics (ADR-011 D2: 6
   suites / 10 expectations - money sign policy, line sanity, feed sanity,
   temporal coherence, published money), NOT PII pattern-matching.

@@ -3,7 +3,7 @@
 Real captures from the running stack (17 containers, one `make up`). Nothing
 here is mocked or staged: these are the live Airflow, Grafana and Marquez UIs
 serving the data the pipeline actually processed. Dates and counters you can
-see line up with `EVIDENCE/metrics.md` and the make targets in the README.
+see line up with the measured bench bands in the README and the make targets.
 
 | File | What it shows |
 |---|---|
