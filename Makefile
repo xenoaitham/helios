@@ -10,7 +10,7 @@ ENV_FILE := .env
 export HELIOS_PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill chaos-test airflow-image run-etl backfill airflow-logs clean
+.PHONY: help env up down ps logs smoke-test test-soap smoke-soap seed-soap reseed-soap contract-freeze seed-oltp reseed-oltp oltp-status test-oltp mutator-logs test-rest smoke-rest test-drop drop-generate drop-generate-late drop-ls cdc-setup cdc-status cdc-verify test-cdc ingest-soap ingest-file ingest-rest ingest-all ingest-status test-ingest dbt-image dbt-build dbt-test dbt-freshness dq-image dq-run dq-replay dq-status test-dq lineage-verify metrics-verify metrics-drill chaos-test bench airflow-image run-etl backfill airflow-logs clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -190,6 +190,17 @@ metrics-drill: ## Alert fire-drill: stop statsd-exporter, assert HeliosScrapeTar
 # green-state guard and does not grow. One scenario: make chaos-test SCENARIO=kill_worker
 chaos-test: ## Chaos drills (all 7, ~60-90 min) or one: SCENARIO=01|kill_worker|poison_cdc|...
 	bash scripts/chaos-test.sh $(SCENARIO)
+
+# --- Phase 5 item 14: bench (ADR-015). One measured pass of the REAL pipeline
+# per stage — SOAP full-walk read, CDC applied-drain on the live mutator, the
+# dbt full re-materialization (~14M rows; the "5M-row full load"), the GE gate
+# scan, and one orchestrated daily_close end-to-end — each leg's transcript in
+# EVIDENCE/bench-<label>-<leg>.log; EVIDENCE/metrics.md is the roll-up (built
+# by hand from the logs, every number traceable). Read-only platform-side:
+# no reseed, no mutator pause, no chaos acts; smoke-test does not grow.
+# Default label = UTC timestamp (repeated passes never overwrite).
+bench: ## Timed full-load + per-stage rows/sec -> EVIDENCE/bench-*.log (ADR-015); label a pass with BENCH_LABEL=
+	bash scripts/bench/bench.sh $(BENCH_LABEL)
 
 clean: ## DESTRUCTIVE: stop everything and delete all data volumes
 	$(COMPOSE) down -v

@@ -203,7 +203,10 @@ zero_check "dq gate: no open quarantined incidents (dead-letter clean)" \
 MQ="http://localhost:${MARQUEZ_API_PORT:-5000}"
 MQ_DS_NS='postgres%3A%2F%2Fwarehouse-db%3A5432'
 # first arg: path; any further args: extra curl options (e.g. -G --data-urlencode ...)
-mq() { local p="$1"; shift; curl -sf --max-time 15 "$@" "$MQ$p"; }
+mq() { local p="$1"; shift; curl -sf --max-time 45 "$@" "$MQ$p"; }
+# max-time 45 (was 15): the helios /jobs payload grows with run history —
+# measured ~16 s server-side 2026-09-15 (see lineage-verify.sh). Same checks,
+# same count: latency repair only, not growth.
 
 lineage_ok() { echo "[ok]   $1"; }
 lineage_fail() { echo "[FAIL] $1"; STAGE2_FAIL=1; }

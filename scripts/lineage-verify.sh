@@ -30,7 +30,12 @@ mkdir -p "$OUT"
 
 fail() { echo "[lineage-verify] FAIL: $*"; exit 1; }
 ok()   { echo "[lineage-verify] ok: $*"; }
-mq()   { curl -sf --max-time 15 "$BASE$1"; }   # -f: HTTP errors abort loudly
+mq()   { curl -sf --max-time 45 "$BASE$1"; }   # -f: HTTP errors abort loudly.
+# max-time 45 (was 15): the helios /jobs payload grows monotonically with run
+# history (every run embeds facet-heavy latestRun JSON) — measured 2.6 MB /
+# ~16 s server-side on 2026-09-15 after 3 days of chaos+bench closes (VACUUM
+# ANALYZE did not move it: app-level assembly, not DB stats). 15s timed out
+# a healthy store.
 
 command -v curl >/dev/null || fail "curl not found on host"
 command -v python3 >/dev/null || fail "python3 not found on host (JSON parsing)"
