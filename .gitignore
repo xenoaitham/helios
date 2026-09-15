@@ -31,3 +31,11 @@ airflow-logs/
 .mimosa/
 .v2c/
 out/
+site/
+
+# local working docs (session notes and state - kept on disk, not published)
+STATE.md
+BACKLOG.md
+MASTER_PROMPT.md
+devlogs/
+SESSION_PROMPTS/

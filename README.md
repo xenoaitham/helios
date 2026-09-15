@@ -1,27 +1,28 @@
-# HELIOS — Legacy-to-Lakehouse ETL Modernization Platform
+# HELIOS - Legacy-to-Lakehouse ETL Modernization Platform
 
 > A containerized enterprise data platform that modernizes legacy SOAP services, flat-file
 > batch feeds, REST APIs, and OLTP database changes (CDC) into a governed dimensional
-> warehouse — with orchestrated ETL, data-quality gates, lineage tracking, and full
+> warehouse - with orchestrated ETL, data-quality gates, lineage tracking, and full
 > observability.
 
-**This is a personal portfolio project** (not employment work). Every claim in this README
-maps to a `make` target or a file you can check. Every number in the docs comes from a
-measured run recorded in [`EVIDENCE/`](EVIDENCE/).
+**This is a personal project** (not employment work), built in the open. Every claim in
+this README maps to a `make` target or a file you can check. Every number in the docs
+comes from a measured run recorded in [`EVIDENCE/`](EVIDENCE/).
 
 ## Status
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done — [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
-| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done — [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
-| 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done — [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
-| 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ✅ done — [EVIDENCE/phase-3.md](EVIDENCE/phase-3.md) roll-up |
+| 0 | Scaffold: compose baseline, Makefile, state files, ADR-000 | ✅ done - [EVIDENCE/phase-0.md](EVIDENCE/phase-0.md) |
+| 1 | Sources: SOAP service, REST mock, dirty file feeds, OLTP seeder | ✅ done - [phase-1-soap](EVIDENCE/phase-1-soap.md) / [phase-1-oltp](EVIDENCE/phase-1-oltp.md) / [phase-1-rest](EVIDENCE/phase-1-rest.md) / [phase-1-filedrop](EVIDENCE/phase-1-filedrop.md) |
+| 2 | Movement: Debezium CDC → Kafka → raw zone; batch extractors | ✅ done - [phase-2-cdc](EVIDENCE/phase-2-cdc.md) / [phase-2-ingest](EVIDENCE/phase-2-ingest.md) / roll-up [phase-2](EVIDENCE/phase-2.md) |
+| 3 | Warehouse & dbt: star schema, SCD2, Airflow DAGs, `make run-etl` | ✅ done - [EVIDENCE/phase-3.md](EVIDENCE/phase-3.md) roll-up |
 | 4 | Trust & observability: Great Expectations gates ([phase-4-dq](EVIDENCE/phase-4-dq.md)), Marquez lineage ([phase-4-lineage](EVIDENCE/phase-4-lineage.md)), Prometheus + Grafana ([phase-4-metrics](EVIDENCE/phase-4-metrics.md)) | ✅ done |
 | 5 | Chaos & performance: [chaos 7/7](EVIDENCE/phase-5-chaos.md) (ADR-014), [bench → metrics.md](EVIDENCE/metrics.md) (ADR-015) | ✅ done |
-| 6 | Package: [RUNBOOK](docs/RUNBOOK.md) + drill (ADR-016), [DATA_DICTIONARY](docs/DATA_DICTIONARY.md), [INTERVIEW_DEFENSE](docs/INTERVIEW_DEFENSE.md) (54 Q&A, ESB mapping, AliCloud notes) | ✅ done — project CLOSED 2026-09-15 |
+| 6 | Package: [RUNBOOK](docs/RUNBOOK.md) + drill (ADR-016), [DATA_DICTIONARY](docs/DATA_DICTIONARY.md), [INTERVIEW_DEFENSE](docs/INTERVIEW_DEFENSE.md) (54 Q&A, ESB mapping, AliCloud notes) | ✅ done - project CLOSED 2026-09-15 |
 
-Current state: see [STATE.md](STATE.md) (always current) and [BACKLOG.md](BACKLOG.md).
+Want to see it without running it? Real captures of the live UIs are in
+[`screenshots/`](screenshots/) (Airflow grid, Grafana dashboard, Marquez lineage).
 
 ## Quickstart
 
@@ -35,9 +36,9 @@ make down        # stop (data volumes preserved)
 ```
 
 First run creates `.env` from `.env.example` (local-dev defaults) automatically, pulls
-the images once (sizes visible via `docker images` — Airflow is the big one), and seeds
-the sources (SOAP ~382k orders ~44 s; OLTP 5.4M rows ~3.5 min — `EVIDENCE/phase-1-*.md`).
-The full fresh-clone walk — including the one-time CDC bootstrap and first close — is the
+the images once (sizes visible via `docker images` - Airflow is the big one), and seeds
+the sources (SOAP ~382k orders ~44 s; OLTP 5.4M rows ~3.5 min - `EVIDENCE/phase-1-*.md`).
+The full fresh-clone walk - including the one-time CDC bootstrap and first close - is the
 [recover-from-scratch drill](docs/RUNBOOK.md#4-recovery-from-scratch-drill--the-honest-version-adr-016-d1)
 in the RUNBOOK (proven at Phase-0 code state; re-verification on a scratch
 machine is named future work, ADR-016 D1).
@@ -66,7 +67,7 @@ lineage and metrics assertions) and exits non-zero on any mismatch.
 
 `daily_close` tasks and the wrapped dbt build emit OpenLineage to Marquez. The
 graph is **dbt's raw sources → staging → marts** (the ingest→raw hop is
-job-level only — the emit boundary is stated verbatim in ADR-012 D2), with
+job-level only - the emit boundary is stated verbatim in ADR-012 D2), with
 column-level lineage into marts (e.g. `dim_customer.customer_sk ─→
 fct_orders.customer_sk`). Verify it yourself:
 
@@ -76,38 +77,38 @@ make run-etl          # a full close emits fresh events (dbt_build runs dbt-ol; 
 ```
 
 The pipeline is non-fatal when Marquez is down (drilled: full close green with
-the api stopped; events resume on return — `EVIDENCE/phase-4-lineage/drill-marquez-down.log`).
+the api stopped; events resume on return - `EVIDENCE/phase-4-lineage/drill-marquez-down.log`).
 
 ### Metrics & alerting (Phase 4, ADR-013)
 
 Airflow 2.10.5 emits StatsD (the only metrics egress the installed version
-has — verified in the running image; names verified against the installed
+has - verified in the running image; names verified against the installed
 source, not blogs) → `statsd-exporter` maps the name-encoded legacy metrics
 (`airflow_task_finish_total{dag_id,task_id,state}`,
 `airflow_dagrun_duration_seconds{dag_id,status}` histogram,
 `airflow_scheduler_heartbeat`) → Prometheus scrapes + evaluates three alert
 rules → Grafana renders [dashboards as code](observability/grafana/).
 Row counts and task durations are read-only SQL pulls (warehouse-db /
-airflow-db datasources) — observability only ever pulls; UDP is
+airflow-db datasources) - observability only ever pulls; UDP is
 dropped-not-queued; no `depends_on` touches the metrics stack. Drills:
 `make metrics-drill` (a rule genuinely fires on a stopped scraped target,
 then recovers) and the full-stack non-fatal drill (two closes green with
 Prometheus + Grafana + the exporter stopped; `NoStatsLogger` fallback in the
-scheduler's own logs) — `EVIDENCE/phase-4-metrics.md`.
+scheduler's own logs) - `EVIDENCE/phase-4-metrics.md`.
 
 ```bash
 make metrics-verify   # API-asserted: targets up, rules loaded, real metric values, Grafana provisioning; dumps EVIDENCE
 make metrics-drill    # alert fire-drill: stop a scraped target → HeliosScrapeTargetDown fires → restart → resolves
 ```
 
-Honest ceiling: NO Alertmanager and no push channel exists — rules surface as
+Honest ceiling: NO Alertmanager and no push channel exists - rules surface as
 the ALERTS series, Prometheus `/alerts`, and the dashboard's firing-alerts
 table; nothing notifies anyone. Metrics history is derived ephemeral state
 (wipe story in ADR-013 D4: not re-derivable, unlike lineage).
 
 ### Chaos engineering (Phase 5, ADR-014)
 
-Seven scripted destructive scenarios — each one: pre-state measurement →
+Seven scripted destructive scenarios - each one: pre-state measurement →
 chaos act → assert the platform DEGRADES SAFELY (named mechanism, measured
 while degraded) → recovery → a measured convergence proof. Full transcripts
 in `EVIDENCE/chaos-*.log`, roll-up with the numbers in
@@ -121,20 +122,20 @@ make chaos-test SCENARIO=poison_cdc  # one scenario: number (01..07) or name
 Scenarios: `kill_worker` (SIGKILL the dbt one-shot mid-build → the Airflow
 task retry converges the SAME run; snapshot invariant bit-identical),
 `kill_warehouse_midbuild` (warehouse-db down mid-build → the build fails
-loudly, the published layer is never partial — dbt commits per-model, so
-every target is a complete replacement — and the retry rebuilds on the
+loudly, the published layer is never partial - dbt commits per-model, so
+every target is a complete replacement - and the retry rebuilds on the
 restored DB),
 `kill_oltp_midcdc` (source down → the replication slot holds; **measured: a
-FAILED Debezium task does not self-recover — the scripted recovery restarts
+FAILED Debezium task does not self-recover - the scripted recovery restarts
 the task via the Connect API**; retained WAL peak/drain measured),
 `poison_cdc` / `poison_csv` (the Session-9 injections scripted: gate red →
 dead-letter → **HeliosAirflowTaskFailure fires, 69–80 s measured across three
 executions; final-suite transcripts 69/73 s** → source
 fix → green close → `dq-replay` resolves; row-level targeting re-proven),
-`schema_drift` (ADD COLUMN proven invisible end-to-end — the honest gap —
+`schema_drift` (ADD COLUMN proven invisible end-to-end - the honest gap -
 plus a guarded rename probe: the mutator fails loudly, the pipeline would
 not detect it either; both reverted), `api_outage` (**the dependency
-contract self-heals stopped/paused/partitioned sources — measured 3 ways —
+contract self-heals stopped/paused/partitioned sources - measured 3 ways -
 so the outage is a watchdog-enforced network partition; task failures are
 loud, in-run retries converge, raw counts bit-identical**).
 
@@ -144,7 +145,7 @@ green-state guard and does not grow.
 
 ### Bench (Phase 5, ADR-015)
 
-`make bench` times the REAL pipeline per stage — every rate is a measured row
+`make bench` times the REAL pipeline per stage - every rate is a measured row
 count ÷ a measured wall, traceable to a transcript in `EVIDENCE/bench-*.log`,
 rolled up with date + hardware in [EVIDENCE/metrics.md](EVIDENCE/metrics.md).
 Three complete 6/6-leg passes (incl. the CRITIC's independent re-run); the
@@ -152,13 +153,13 @@ honest headline BANDS (never a single run; this laptop, not production):
 
 | Stage | Band (three passes) |
 |---|---|
-| dbt full re-materialization (14 models + snapshot — the platform's real full load) | **14,095,849–14,136,532 rows in 65–82 s = 172k–217k rows/s** (the ~5.45M-row items table: ~300–334k staged) |
+| dbt full re-materialization (14 models + snapshot - the platform's real full load) | **14,095,849–14,136,532 rows in 65–82 s = 172k–217k rows/s** (the ~5.45M-row items table: ~300–334k staged) |
 | SOAP full walk (READ; landed=0 by idempotence) | 382,179 rows @ 2,637–2,773 rows/s |
-| CDC applied drain (live mutator, lag=0) | 7.4–7.7 events/s — the mutator's pace, not a ceiling (≈6.3k events/s measured at snapshot drain) |
+| CDC applied drain (live mutator, lag=0) | 7.4–7.7 events/s - the mutator's pace, not a ceiling (≈6.3k events/s measured at snapshot drain) |
 | GE semantic gate scan (6 suites) | ~8.5M rows @ 608k–766k rows/s |
 | Orchestrated `daily_close` end-to-end | 150.7–163.4 s server-side, 5/5 tasks green (dbt_build 69–82 s, dq_gate 16–17 s) |
 
-## Architecture (target — components annotated with the phase that delivers them)
+## Architecture (target - components annotated with the phase that delivers them)
 
 ```mermaid
 flowchart LR
@@ -226,12 +227,12 @@ flowchart LR
 The 17 long-running containers this diagram maps to: `oltp-db`, `oltp-mutator`,
 `soap-service`, `rest-mock`, `kafka`, `cdc-connect`, `cdc-sink`, `warehouse-db`,
 `airflow-webserver`, `airflow-scheduler`, `airflow-db`, `marquez-db`,
-`marquez-api`, `marquez-web`, `statsd-exporter`, `prometheus`, `grafana` — all
+`marquez-api`, `marquez-web`, `statsd-exporter`, `prometheus`, `grafana` - all
 healthy after one `make up` (the batch tools are one-shot containers, run by
 `make` or by the scheduler, never long-lived).
 
-The shipped reality always outruns this static file — [STATE.md](STATE.md) is the
-current state and each phase's CRITIC review checks the repo against the diagram.
+The shipped reality always outruns this static file - each milestone's review checks the
+repo against the diagram.
 
 ### Source 1: soap-service (Phase 1)
 
@@ -241,7 +242,7 @@ UpdateOrderStatus`, state machine NEW→PROCESSING→SHIPPED→DELIVERED (+CANCE
 NEW/PROCESSING), idempotent `CreateOrder` via `client_reference`, faults
 (`OrderNotFound`, `InvalidStateTransition`, `ValidationError`,
 `ClientReferenceConflict`). Owns its own SQLite store on the `soap_data` volume
-(deliberately NOT the OLTP Postgres — independent source systems), seeded
+(deliberately NOT the OLTP Postgres - independent source systems), seeded
 deterministically with 3 years of order history on first boot.
 
 ```bash
@@ -319,8 +320,8 @@ dbt/                   (Ph.3 ✅) dbt project: 14 table models (staging + marts)
 dq/                    (Ph.4 ✅) Great Expectations suites + dead-letter quarantine
                        + replay (32 tests, ADR-011)
 observability/         (Ph.4 ✅) statsd-exporter mapping, Prometheus scrape+rules,
-                       Grafana datasources+dashboard — all as code (ADR-013)
-DECISIONS/             ADRs — why the platform looks like this
+                       Grafana datasources+dashboard - all as code (ADR-013)
+DECISIONS/             ADRs - why the platform looks like this
 EVIDENCE/              verifier logs + metrics; the source of every number we claim
 docs/                  RUNBOOK.md, DATA_DICTIONARY.md, INTERVIEW_DEFENSE.md
 STATE.md               one-screen session state; read me first
@@ -329,12 +330,13 @@ BACKLOG.md             ordered work items
 
 ## Operating the platform
 
-See [docs/RUNBOOK.md](docs/RUNBOOK.md) — start/stop, health, logs, destructive ops,
+See [docs/RUNBOOK.md](docs/RUNBOOK.md) - start/stop, health, logs, destructive ops,
 troubleshooting, and the rootless-Docker bootstrap used on the dev machine this was
 built on.
 
 ## License / honesty
 
-Personal portfolio project by a Solution Architect candidate. Built to be broken into:
-try `make chaos-test` (Phase 5) and read [docs/INTERVIEW_DEFENSE.md](docs/INTERVIEW_DEFENSE.md)
-for known limitations — including where this design falls over at 100× scale.
+A personal project by a solution architect candidate, built and documented in the open.
+Built to be broken into: try `make chaos-test` and read
+[docs/INTERVIEW_DEFENSE.md](docs/INTERVIEW_DEFENSE.md) for known limitations -
+including where this design falls over at 100× scale.

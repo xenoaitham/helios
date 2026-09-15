@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HELIOS - legacy to lakehouse ETL platform</title>
-<meta name="description" content="A containerized enterprise data platform: SOAP, flat files, REST and CDC into a governed dimensional warehouse. Personal portfolio project.">
+<meta name="description" content="A containerized enterprise data platform: SOAP, flat files, REST and CDC into a governed dimensional warehouse. Personal project, built in the open.">
 <style>
   :root { color-scheme: dark; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -44,7 +44,7 @@
 <div class="wrap">
 
   <header>
-    <div class="hero"><img src="assets/helios-card.png" alt="HELIOS project card"></div>
+    <div class="hero"><img src="assets/helios-card.png" alt="HELIOS live: Airflow run grid, Grafana dashboard, Marquez job history and lineage graph - real captures"></div>
   </header>
 
   <h1>a legacy enterprise, in a compose file</h1>
@@ -53,7 +53,7 @@
     drops, a flaky REST API and a busy OLTP database - into a governed dimensional
     warehouse: Debezium CDC, Airflow orchestration, dbt transformations, Great Expectations
     quality gates with dead-letter quarantine, Marquez lineage, Prometheus/Grafana.
-    Personal portfolio project, COMPLETE: every number below is reproducible with a make target.
+    Personal project, COMPLETE: every number below is reproducible with a make target.
   </p>
   <div style="margin-top:10px">
     <span class="tag">SOAP 1.1 / spyne</span><span class="tag">Postgres x3</span>
@@ -78,11 +78,11 @@
   <table>
     <tr><th>metric</th><th>value</th></tr>
     <tr><td>tests</td><td>195 pytest · 144 dbt data tests · 32 dq unit tests, all green</td></tr>
-    <tr><td>smoke gate</td><td>stage 1: 26/26 checks + stage 2: full E2E close, exit 0 — 17 containers healthy</td></tr>
+    <tr><td>smoke gate</td><td>stage 1: 26/26 checks + stage 2: full E2E close, exit 0 - 17 containers healthy</td></tr>
     <tr><td>bench (3 passes)</td><td>full load 14.1M rows in 65–82 s (172k–217k rows/s); SOAP re-read 382,179 @ 2,637–2,773 rows/s; CDC applied 7.4–7.7 events/s</td></tr>
     <tr><td>chaos</td><td>7/7 destructive scenarios, measured recovery + convergence proofs (suite wall 3,204 s)</td></tr>
-    <tr><td>ADRs</td><td>17 (adr-000 … adr-016) — every decision has an alternatives table</td></tr>
-    <tr><td>evidence</td><td>every claim maps to a make target or a file in EVIDENCE/ — enforced by make docs-verify</td></tr>
+    <tr><td>ADRs</td><td>17 (adr-000 … adr-016) - every decision has an alternatives table</td></tr>
+    <tr><td>evidence</td><td>every claim maps to a make target or a file in EVIDENCE/ - enforced by make docs-verify</td></tr>
   </table>
 
   <h2>run it yourself</h2>
@@ -94,6 +94,14 @@ make cdc-setup && docker compose restart cdc-sink   # that one-time bootstrap, t
 make smoke-test  # green end-to-end: 26 infra checks + a real orchestrated close
 make run-etl     # trigger the full pipeline and watch it
 make docs-verify # the docs honesty sweep: targets, paths, evidence, no unverifiable numbers</pre>
+
+  <h2>see it run</h2>
+  <p>
+    Real captures from the live stack are in <a href="https://github.com/xenoaitham/helios/tree/main/screenshots">screenshots/</a>:
+    the Airflow grid (25 nightly closes, chaos-era failures honestly red), the Grafana
+    observability dashboard, and Marquez with the full lineage graph into
+    <span class="mono">fct_orders</span>.
+  </p>
 
   <h2>dig deeper</h2>
   <p>
@@ -107,7 +115,7 @@ make docs-verify # the docs honesty sweep: targets, paths, evidence, no unverifi
   </p>
 
   <footer>
-    personal portfolio project by a solution architect candidate, built in the open, one phase at a time.
+    a personal project by a solution architect candidate, built in the open, one milestone at a time.
     complete 2026-09-15: start at README.md, then docs/RUNBOOK.md and docs/INTERVIEW_DEFENSE.md.
   </footer>
 
